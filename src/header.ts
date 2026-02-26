@@ -39,7 +39,7 @@ import {
   CTRL_HEAP_WRITE,
   CTRL_HEAP_COMMIT,
   CTRL_ABORT,
-  STATUS_IDLE,
+  STATUS_INITIALIZING,
   computeTotalBytes,
 } from './constants';
 import { encodeSchema, decodeSchema, schemaFingerprint } from './schema';
@@ -223,7 +223,7 @@ export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap): void {
   Atomics.store(ctrl, CTRL_WRITE_SEQ,   0);
   Atomics.store(ctrl, CTRL_COMMIT_SEQ,  0);
   Atomics.store(ctrl, CTRL_READ_CURSOR, 0);
-  Atomics.store(ctrl, CTRL_STATUS,      STATUS_IDLE);
+  Atomics.store(ctrl, CTRL_STATUS,      STATUS_INITIALIZING);
   Atomics.store(ctrl, CTRL_HEAP_WRITE,  0);
   Atomics.store(ctrl, CTRL_HEAP_COMMIT, 0);
   Atomics.store(ctrl, CTRL_ABORT,       0);

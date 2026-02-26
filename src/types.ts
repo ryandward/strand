@@ -19,8 +19,23 @@
  *           boundary — skip-sentinels force a wrap before any oversized write.
  *
  * utf8_ref: Interned string. The record stores a u32 handle into a
- *           side-channel intern table passed to StrandView. Use for
- *           low-cardinality strings: chromosome names, filter labels, etc.
+ *           side-channel intern table passed to StrandView. Use ONLY for
+ *           low-cardinality strings whose values repeat frequently across
+ *           records: chromosome names ('chr1'…'chrM'), filter tags ('PASS',
+ *           'LowQual'), strand symbols ('+'/'-'). High-cardinality fields
+ *           (read names, sequences, variant IDs) must use utf8 — the intern
+ *           table grows monotonically with no eviction and becomes a memory
+ *           leak if the value space is large. Rule of thumb: if the field has
+ *           fewer than ~1000 distinct values per stream, utf8_ref is safe.
+ *
+ * json:     Variable-length JSON blob stored in the heap region, same wire
+ *           format as utf8 ([heap_offset: u32][heap_len: u16], 6 bytes).
+ *           Use for sparse per-record metadata whose shape is not known at
+ *           schema definition time (INFO tags, FORMAT fields, annotation maps).
+ *           The writer calls JSON.stringify() before writing; RecordCursor
+ *           calls JSON.parse() on first access and caches the result.
+ *           Prefer fixed-width fields for hot-path data — json decode is only
+ *           lazy but still allocates a new object per record per seek().
  */
 export type FieldType =
   | 'i32'
@@ -32,7 +47,8 @@ export type FieldType =
   | 'u8'
   | 'bool8'
   | 'utf8'
-  | 'utf8_ref';
+  | 'utf8_ref'
+  | 'json';
 
 /** Byte width of each FieldType inside the fixed-width index record. */
 export const FIELD_BYTE_WIDTHS: Readonly<Record<FieldType, number>> = {
@@ -46,6 +62,7 @@ export const FIELD_BYTE_WIDTHS: Readonly<Record<FieldType, number>> = {
   bool8:    1,
   utf8:     6, // [heap_offset: u32][heap_len: u16]
   utf8_ref: 4, // [intern_handle: u32]
+  json:     6, // [heap_offset: u32][heap_len: u16] — same wire format as utf8
 };
 
 // ─── Field Flags ──────────────────────────────────────────────────────────────
@@ -129,4 +146,4 @@ export interface StrandMap {
 
 // ─── Stream Status ────────────────────────────────────────────────────────────
 
-export type StrandStatus = 'idle' | 'streaming' | 'eos' | 'error';
+export type StrandStatus = 'initializing' | 'streaming' | 'eos' | 'error';

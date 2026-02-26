@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 120" width="400" height="120">
+  <defs>
+    <linearGradient id="strandGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="100%" stop-color="#0055FF" />
+    </linearGradient>
+    
+    <linearGradient id="strandGrad2" x1="100%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#7C4DFF" />
+      <stop offset="100%" stop-color="#18FFFF" />
+    </linearGradient>
+
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <rect width="400" height="120" fill="#0D1117" rx="12"/>
+
+  <g transform="translate(30, 20)" filter="url(#glow)">
+    <path d="M 25 20 C 60 20, 60 60, 25 60 C -10 60, -10 20, 25 20 Z" 
+          fill="none" stroke="url(#strandGrad2)" stroke-width="8" stroke-linecap="round" opacity="0.6" />
+    
+    <path d="M 55 20 C 90 20, 90 60, 55 60 C 20 60, 20 20, 55 20" 
+          fill="none" stroke="url(#strandGrad1)" stroke-width="8" stroke-linecap="round" />
+          
+    <circle cx="20" cy="30" r="3" fill="#FFF" />
+    <circle cx="60" cy="50" r="3" fill="#FFF" />
+    <circle cx="40" cy="40" r="3" fill="#FFF" />
+  </g>
+
+  <g transform="translate(140, 72)">
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="42" font-weight="800" fill="#FFFFFF" letter-spacing="2">STRAND</text>
+    <text x="3" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace" font-size="12" font-weight="600" fill="#00E5FF" letter-spacing="4">ZERO-COPY ENGINE</text>
+  </g>
+</svg>

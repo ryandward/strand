@@ -44,6 +44,7 @@ import {
   CTRL_READ_CURSOR,
   CTRL_STATUS,
   CTRL_ABORT,
+  STATUS_INITIALIZING,
   STATUS_STREAMING,
   STATUS_EOS,
   STATUS_ERROR,
@@ -85,18 +86,19 @@ export class RecordCursor {
 
   private _recordOffset: number = 0;
   private readonly _stringCache = new Map<string, string>();
+  private readonly _jsonCache   = new Map<string, unknown>();
 
   /** @internal — use StrandView.allocateCursor() */
   constructor(
-    private readonly _ctrl:          Int32Array,
-    private readonly _data:          DataView,
-    private readonly _sab:           SharedArrayBuffer,
-    private readonly _fieldIndex:    ReadonlyMap<string, FieldDescriptor>,
-    private readonly _heapStartByte: number,
-    private readonly _heapCapacity:  number,
-    private readonly _internTable:   readonly string[],
-    private readonly _indexCapacity: number,
-    private readonly _recordStride:  number,
+    private readonly _ctrl:           Int32Array,
+    private readonly _data:           DataView,
+    private readonly _sab:            SharedArrayBuffer,
+    private readonly _fieldIndex:     ReadonlyMap<string, FieldDescriptor>,
+    private readonly _heapStartByte:  number,
+    private readonly _heapCapacity:   number,
+    private readonly _internTableCell: { value: readonly string[] },
+    private readonly _indexCapacity:  number,
+    private readonly _recordStride:   number,
   ) {}
 
   /**
@@ -131,6 +133,7 @@ export class RecordCursor {
 
     if (seq !== this.seq) {
       this._stringCache.clear();
+      this._jsonCache.clear();
       this.seq = seq;
     }
 
@@ -238,6 +241,50 @@ export class RecordCursor {
   }
 
   /**
+   * Decode and parse a json field from the heap.
+   *
+   * The heap bytes are a UTF-8 encoded JSON string written by the producer via
+   * JSON.stringify(). This method decodes the bytes and calls JSON.parse() on
+   * first access, then caches the parsed result for the current record. A second
+   * call for the same field and same seq returns the cached object — no
+   * re-decode, no re-parse.
+   *
+   * Returns null if the field does not exist, has the wrong type, or was
+   * written with a null / non-serializable value.
+   */
+  getJson(name: string): unknown {
+    const f = this._fieldIndex.get(name);
+    if (!f || f.type !== 'json') return null;
+
+    const cached = this._jsonCache.get(name);
+    if (cached !== undefined) return cached;
+
+    const heapOffset = this._data.getUint32(this._recordOffset + f.byteOffset,     true);
+    const heapLen    = this._data.getUint16(this._recordOffset + f.byteOffset + 4, true);
+
+    if (heapLen === 0) {
+      this._jsonCache.set(name, null);
+      return null;
+    }
+
+    const physOffset = this._heapStartByte + (heapOffset % this._heapCapacity);
+
+    if (physOffset + heapLen > this._sab.byteLength) {
+      throw new RangeError(
+        `Heap read out of bounds for field '${name}': ` +
+        `physOffset=${physOffset} len=${heapLen} bufLen=${this._sab.byteLength}. ` +
+        `This indicates a writer/consumer ring-wrap mismatch.`,
+      );
+    }
+
+    const bytes   = new Uint8Array(this._sab, physOffset, heapLen);
+    const text    = utf8Decoder.decode(bytes);
+    const parsed: unknown = JSON.parse(text);
+    this._jsonCache.set(name, parsed);
+    return parsed;
+  }
+
+  /**
    * Resolve a utf8_ref field to its interned string.
    *
    * utf8_ref fields store a u32 handle. The intern table is a string array
@@ -251,7 +298,7 @@ export class RecordCursor {
     if (!f || f.type !== 'utf8_ref') return null;
 
     const handle = this._data.getUint32(this._recordOffset + f.byteOffset, true);
-    return this._internTable[handle] ?? null;
+    return this._internTableCell.value[handle] ?? null;
   }
 
   /**
@@ -261,9 +308,13 @@ export class RecordCursor {
    *   bool8         → boolean
    *   utf8          → string (decoded from heap on read, cached per record)
    *   utf8_ref      → string (resolved from intern table on read)
+   *   json          → unknown (parsed from heap on read, cached per record)
    *   unknown field → null
+   *
+   * For json fields, prefer calling getJson() directly to preserve the
+   * `unknown` return type without downcasting.
    */
-  get(name: string): number | bigint | boolean | string | null {
+  get(name: string): number | bigint | boolean | string | unknown {
     const f = this._fieldIndex.get(name);
     if (!f) return null;
 
@@ -278,6 +329,7 @@ export class RecordCursor {
       case 'bool8':    return this.getBool(name);
       case 'utf8':     return this.getString(name);
       case 'utf8_ref': return this.getRef(name);
+      case 'json':     return this.getJson(name);
     }
   }
 }
@@ -295,6 +347,9 @@ export class RecordCursor {
  * @param internTable Optional. String array for resolving utf8_ref field handles.
  *                    Index N resolves handle N. Typically the chromosome name
  *                    list: ['chr1', 'chr2', ..., 'chrX', 'chrY', 'chrM'].
+ *                    Must contain fewer than ~1000 distinct values — the intern
+ *                    table grows monotonically with no eviction. Use utf8 for
+ *                    high-cardinality fields (read names, sequences, variant IDs).
  */
 export class StrandView {
   /** The underlying SAB. Pass to Workers via postMessage — zero-copy. */
@@ -303,22 +358,46 @@ export class StrandView {
   /** StrandMap reconstructed from the binary header. */
   readonly map: StrandMap;
 
-  private readonly ctrl:          Int32Array;
-  private readonly data:          DataView;
-  private readonly fieldIndex:    ReadonlyMap<string, FieldDescriptor>;
-  private readonly heapStartByte: number;
-  private readonly internTable:   readonly string[];
+  private readonly ctrl:           Int32Array;
+  private readonly data:           DataView;
+  private readonly fieldIndex:     ReadonlyMap<string, FieldDescriptor>;
+  private readonly heapStartByte:  number;
+
+  /**
+   * Indirection cell so updateInternTable() propagates to all allocated cursors
+   * without needing to track them. Both StrandView and every RecordCursor hold
+   * a reference to this same object; mutating `.value` is immediately visible
+   * to all cursors.
+   */
+  private readonly _internTableCell: { value: readonly string[] };
 
   constructor(sab: SharedArrayBuffer, internTable: readonly string[] = []) {
     // readStrandHeader throws on any validation failure.
     // No partial state is possible: either the view is fully valid or it throws.
-    this.map          = readStrandHeader(sab);
-    this.sab          = sab;
-    this.ctrl         = new Int32Array(sab, 0, CTRL_ARRAY_LEN);
-    this.data         = new DataView(sab);
-    this.internTable  = internTable;
-    this.heapStartByte = heapStart(this.map.index_capacity, this.map.record_stride);
-    this.fieldIndex   = new Map(this.map.schema.fields.map(f => [f.name, f]));
+    this.map               = readStrandHeader(sab);
+    this.sab               = sab;
+    this.ctrl              = new Int32Array(sab, 0, CTRL_ARRAY_LEN);
+    this.data              = new DataView(sab);
+    this._internTableCell  = { value: internTable };
+    this.heapStartByte     = heapStart(this.map.index_capacity, this.map.record_stride);
+    this.fieldIndex        = new Map(this.map.schema.fields.map(f => [f.name, f]));
+  }
+
+  /**
+   * Replace the intern table used to resolve utf8_ref field handles.
+   *
+   * Safe to call at any batch boundary — no locking required. All cursors
+   * allocated from this view share the same indirection cell, so they all
+   * observe the new table immediately after this call returns.
+   *
+   * Typical use: the server streams chromosome names as a pre-amble message
+   * before the first record batch, then the client calls updateInternTable()
+   * once per query region or assembly change.
+   *
+   * @param table  New intern table. Index N resolves utf8_ref handle N.
+   */
+  updateInternTable(table: readonly string[]): void {
+    this._internTableCell.value = table;
   }
 
   // ── Atomic state queries ───────────────────────────────────────────────────
@@ -335,10 +414,11 @@ export class StrandView {
   get status(): StrandStatus {
     const raw = Atomics.load(this.ctrl, CTRL_STATUS);
     switch (raw) {
-      case STATUS_STREAMING: return 'streaming';
-      case STATUS_EOS:       return 'eos';
-      case STATUS_ERROR:     return 'error';
-      default:               return 'idle';
+      case STATUS_STREAMING:    return 'streaming';
+      case STATUS_EOS:          return 'eos';
+      case STATUS_ERROR:        return 'error';
+      case STATUS_INITIALIZING:
+      default:                  return 'initializing';
     }
   }
 
@@ -361,7 +441,7 @@ export class StrandView {
       this.fieldIndex,
       this.heapStartByte,
       this.map.heap_capacity,
-      this.internTable,
+      this._internTableCell,
       this.map.index_capacity,
       this.map.record_stride,
     );

@@ -1,8 +1,23 @@
-# @strand/core
+<p align="center">
+  <img src="logo.svg" alt="Strand" width="400" />
+</p>
 
-Zero-copy genomic data streaming over `SharedArrayBuffer`.
+<p align="center">
+  Zero-copy binary data streaming over <code>SharedArrayBuffer</code>.
+</p>
 
-A Worker thread writes records into a lock-free ring buffer; the main thread reads them with zero deserialization overhead and zero per-record heap allocation. Built for high-throughput genomic data streaming (VCF, BAM, BED, BigWig).
+<p align="center">
+  <a href="https://github.com/ryandward/strand/actions/workflows/ci.yml">
+    <img src="https://github.com/ryandward/strand/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <a href="https://www.npmjs.com/package/@strand/core">
+    <img src="https://img.shields.io/npm/v/@strand/core?color=blue" alt="npm" />
+  </a>
+  <img src="https://img.shields.io/badge/TypeScript-5.x-3178c6" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
+</p>
+
+A Worker thread writes typed records into a lock-free ring buffer; the main thread reads them with zero deserialization overhead and zero per-record heap allocation.
 
 ---
 
@@ -38,8 +53,8 @@ Main thread                        SharedArrayBuffer             Worker thread
      │<── resolves ──────────────────────────│                          │
      │  for seq in 0..N:                     │                          │
      │    cursor.seek(seq)                   │  writeRecordBatch([...]) │
-     │    cursor.getU32('pos')               │<─────────────────────────│
-     │    cursor.getString('sequence')       │  (blocks if ring full)   │
+     │    cursor.getU32('x')                 │<─────────────────────────│
+     │    cursor.getString('label')          │  (blocks if ring full)   │
      │  acknowledgeRead(N) ─────────────────>│ ── wakes writer ──────>  │
      │                                       │                          │
      │  waitForCommit(N) ···waiting···        │  finalize()              │
@@ -68,18 +83,18 @@ Requires a runtime with `SharedArrayBuffer` and `Atomics`. In browsers, the serv
 import { buildSchema, computeStrandMap, initStrandHeader } from '@strand/core';
 
 const schema = buildSchema([
-  { name: 'chrom',    type: 'utf8_ref' }, // interned chromosome name (u32 handle)
-  { name: 'pos',      type: 'u32'      }, // 0-based start position
-  { name: 'end',      type: 'u32'      }, // exclusive end position
-  { name: 'quality',  type: 'f32'      }, // PHRED quality score
-  { name: 'sequence', type: 'utf8'     }, // variable-length read sequence
+  { name: 'id',       type: 'u32'      }, // fixed-width integer
+  { name: 'score',    type: 'f32'      }, // fixed-width float
+  { name: 'category', type: 'utf8_ref' }, // interned string (u32 handle, low-cardinality)
+  { name: 'label',    type: 'utf8'     }, // variable-length string (heap)
+  { name: 'meta',     type: 'json'     }, // sparse per-record metadata
 ]);
 
 const map = computeStrandMap({
   schema,
-  index_capacity:    65_536,      // must be a power of 2; ring slots for records
-  heap_capacity:     16 * 1024 * 1024, // bytes for variable-length string data
-  query:             { assembly: 'hg38', chrom: 'chr1', start: 0, end: 248_956_422 },
+  index_capacity:    65_536,           // must be a power of 2; ring slots for records
+  heap_capacity:     16 * 1024 * 1024, // bytes for variable-length string/json data
+  query:             { assembly: 'v1', chrom: 'part-0', start: 0, end: 1_000_000 },
   estimated_records: 50_000,
 });
 
@@ -91,7 +106,7 @@ initStrandHeader(sab, map);
 ### 2. Producer (Worker thread)
 
 ```typescript
-// query-worker.ts
+// worker.ts
 import { workerData } from 'worker_threads';
 import { StrandWriter } from '@strand/core';
 
@@ -100,8 +115,10 @@ const writer  = new StrandWriter(sab);
 
 writer.begin();
 
-for await (const batch of fetchGenomicData()) {
-  writer.writeRecordBatch(batch); // blocks on backpressure; throws StrandAbortError on cancel
+for await (const batch of fetchData()) {
+  // writeRecordBatch blocks on backpressure; throws StrandAbortError on cancel.
+  // Fetch → write → fetch → write. Do not pre-materialize the entire dataset.
+  writer.writeRecordBatch(batch);
 }
 
 writer.finalize();
@@ -112,9 +129,9 @@ writer.finalize();
 ```typescript
 import { StrandView } from '@strand/core';
 
-const chromosomes = ['chr1', 'chr2', /* … */ 'chrX', 'chrY', 'chrM'];
-const view   = new StrandView(sab, chromosomes); // intern table for utf8_ref fields
-const cursor = view.allocateCursor();            // allocate once; reuse for every record
+const categories = ['type-a', 'type-b', 'type-c'];
+const view   = new StrandView(sab, categories); // intern table for utf8_ref fields
+const cursor = view.allocateCursor();           // allocate once; reuse for every record
 
 let seq = 0;
 
@@ -122,24 +139,25 @@ while (true) {
   const count = await view.waitForCommit(seq, 5_000);
 
   for (; seq < count; seq++) {
-    cursor.seek(seq);                            // zero allocations
-    const chrom = cursor.getRef('chrom');
-    const pos   = cursor.getU32('pos');
-    const end   = cursor.getU32('end');
-    const seq_  = cursor.getString('sequence'); // decoded + cached per record
-    render(chrom, pos, end, seq_);
+    cursor.seek(seq);                           // zero allocations
+    const id       = cursor.getU32('id');
+    const score    = cursor.getF32('score');
+    const category = cursor.getRef('category'); // resolved from intern table
+    const label    = cursor.getString('label'); // decoded + cached per record
+    const meta     = cursor.getJson('meta');    // parsed + cached per record
+    render(id, score, category, label, meta);
   }
 
-  view.acknowledgeRead(count);                   // unblocks a stalled producer
+  view.acknowledgeRead(count);                  // unblocks a stalled producer
 
   if (view.status === 'eos') break;
 }
 ```
 
-### 4. Cancel and restart (region change)
+### 4. Cancel and restart
 
 ```typescript
-// User pans to a new region — cancel the current stream.
+// Signal the worker to stop the current stream.
 view.signalAbort();
 
 // In the worker:
@@ -151,9 +169,59 @@ try {
   }
 }
 
-// Reset the ring for a fresh query (both sides must coordinate this).
+// Reset the ring for a fresh stream (both sides must coordinate this).
 writer.reset();
 ```
+
+### 5. Update intern table at runtime
+
+```typescript
+// After a stream restart, the server may send a new category list.
+// Call updateInternTable() — all existing cursors observe the change immediately.
+view.updateInternTable(['type-a', 'type-b', 'type-c', 'type-d']);
+```
+
+---
+
+## Production guidance
+
+### Progress tracking
+
+Track progress against **raw write rate**, not filtered output.
+
+`view.committedCount` increments for every record the producer writes, regardless of whether the consumer renders it. Tie your progress bar to `acknowledgeRead()` calls divided by `map.estimated_records`. Do not filter commits before incrementing the counter — that discards reads the ring still needs to release.
+
+```typescript
+for (; seq < count; seq++) {
+  cursor.seek(seq);
+  if (cursor.getF32('score')! > threshold) {
+    render(cursor);
+  }
+}
+
+// Acknowledge ALL records consumed, not just the rendered subset.
+view.acknowledgeRead(count);
+
+// Progress: total committed vs. expected total.
+const progress = count / view.map.estimated_records;
+```
+
+### Producer must block at the ring
+
+`writeRecordBatch()` blocks the Worker thread when the ring is full. Backpressure only works if the producer **calls `writeRecordBatch()` as it fetches data**, not after pre-materializing everything.
+
+```typescript
+// WRONG — allocates the full dataset in memory before any records flow
+const all = await fetchAll();
+writer.writeRecordBatch(all);
+
+// RIGHT — fetch → write → fetch → write; ring controls the pace
+for await (const batch of streamFetch()) {
+  writer.writeRecordBatch(batch); // stalls here if consumer is slow
+}
+```
+
+If the producer materializes everything first, backpressure cannot slow the upstream fetch, heap grows unbounded, and the ring's capacity guarantee is defeated.
 
 ---
 
@@ -182,7 +250,7 @@ writer.reset();
 | `writeRecordBatch(records)` | Write a batch; blocks via `Atomics.wait` if ring is full; throws `StrandAbortError` on cancel |
 | `finalize()` | Set `STATUS_EOS`; notify consumer |
 | `abort()` | Set `STATUS_ERROR`; notify consumer |
-| `reset()` | Rewind all cursors to zero for a fresh query; does not touch the static header |
+| `reset()` | Rewind all cursors to zero for a fresh stream; does not touch the static header |
 
 ### Consumer — `StrandView`
 
@@ -192,14 +260,15 @@ writer.reset();
 | `waitForCommit(after, timeoutMs?)` | `Atomics.waitAsync` — resolves when `committedCount > after` |
 | `acknowledgeRead(upTo)` | Advance `READ_CURSOR`; unblocks a stalled producer |
 | `signalAbort()` | Set `CTRL_ABORT = 1`; wake a stalled producer |
+| `updateInternTable(table)` | Replace the `utf8_ref` intern table; all allocated cursors observe the change immediately |
 | `committedCount` | `Atomics.load(COMMIT_SEQ)` — records safe to read |
-| `status` | `'idle' \| 'streaming' \| 'eos' \| 'error'` |
+| `status` | `'initializing' \| 'streaming' \| 'eos' \| 'error'` |
 
 ### Consumer — `RecordCursor`
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `seek(seq)` | `boolean` | Position cursor on record `seq`; clears string cache; `false` if seq is out of range |
+| `seek(seq)` | `boolean` | Position cursor on record `seq`; clears caches; `false` if seq is out of range |
 | `getU32(name)` | `number \| null` | |
 | `getI32(name)` | `number \| null` | |
 | `getI64(name)` | `bigint \| null` | |
@@ -209,24 +278,26 @@ writer.reset();
 | `getU8(name)` | `number \| null` | |
 | `getBool(name)` | `boolean \| null` | |
 | `getString(name)` | `string \| null` | Decode UTF-8 from heap; cached per record |
+| `getJson(name)` | `unknown` | Parse JSON from heap; cached per record |
 | `getRef(name)` | `string \| null` | Resolve interned `utf8_ref` handle |
-| `get(name)` | `number \| bigint \| boolean \| string \| null` | Generic accessor |
+| `get(name)` | `number \| bigint \| boolean \| string \| unknown` | Generic accessor |
 | `seq` | `number` | Current sequence number; `-1` before first seek |
 
 ### Field types
 
 | Type | Width | Use |
 |------|-------|-----|
-| `u32` | 4 B | Positions, depths, counts |
-| `i32` | 4 B | Signed scores |
-| `u16` | 2 B | Allele counts, flags |
-| `u8` | 1 B | Strand, base quality |
-| `bool8` | 1 B | Phased, pass/fail flags |
-| `f32` | 4 B | Quality scores, coverage values |
-| `f64` | 8 B | High-precision scores |
-| `i64` | 8 B | Large coordinates |
-| `utf8` | 6 B | Variable-length strings (heap pointer + length) |
-| `utf8_ref` | 4 B | Interned strings — chromosome names, filter tags |
+| `u32` | 4 B | Unsigned integers — IDs, counts, positions |
+| `i32` | 4 B | Signed integers — offsets, deltas |
+| `u16` | 2 B | Small unsigned integers — flags, short counts |
+| `u8` | 1 B | Bytes — single-byte enums, small values |
+| `bool8` | 1 B | Boolean flags |
+| `f32` | 4 B | Single-precision floats — scores, probabilities |
+| `f64` | 8 B | Double-precision floats — high-precision values |
+| `i64` | 8 B | Large signed integers — timestamps, large offsets |
+| `utf8` | 6 B | Variable-length strings — heap pointer + length |
+| `utf8_ref` | 4 B | Interned low-cardinality strings (<1 000 distinct values) |
+| `json` | 6 B | Sparse per-record metadata — heap pointer + length, lazily parsed |
 
 ---
 
@@ -262,7 +333,7 @@ async headers() {
 | Heap growth — 100K `new RecordView()` (old API) | 18.74 MB |
 | Allocation reduction | **1,874×** |
 
-The ring buffer is designed for throughput-critical paths like scrolling through chromosome-scale datasets. Records are committed in batches; the consumer drains asynchronously between renders.
+The ring buffer is designed for throughput-critical hot paths. Records are committed in batches; the consumer drains asynchronously between renders.
 
 ---
 

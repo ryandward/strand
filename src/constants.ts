@@ -103,10 +103,10 @@ export const CTRL_ARRAY_LEN = HEADER_SIZE / 4; // 128
 
 // ─── Status Values ────────────────────────────────────────────────────────────
 
-export const STATUS_IDLE      = 0;
-export const STATUS_STREAMING = 1;
-export const STATUS_EOS       = 2; // end of stream — no more records will be written
-export const STATUS_ERROR     = 3;
+export const STATUS_INITIALIZING = 0; // producer constructed, not yet writing — do not interpret seq=0 as empty
+export const STATUS_STREAMING    = 1; // begin() called, records flowing
+export const STATUS_EOS          = 2; // finalize() called — no more records will be written
+export const STATUS_ERROR        = 3; // abort() called — stream failed; heap may be partial
 
 // ─── Heap Skip Sentinel ───────────────────────────────────────────────────────
 

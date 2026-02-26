@@ -63,7 +63,7 @@ import {
   CTRL_HEAP_WRITE,
   CTRL_HEAP_COMMIT,
   CTRL_ABORT,
-  STATUS_IDLE,
+  STATUS_INITIALIZING,
   STATUS_STREAMING,
   STATUS_EOS,
   STATUS_ERROR,
@@ -115,7 +115,7 @@ export class StrandAbortError extends Error {
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
-export type WritableValue = number | bigint | boolean | string | null | undefined;
+export type WritableValue = number | bigint | boolean | string | object | null | undefined;
 
 /**
  * A record to be written. Keys are schema field names; values must be
@@ -167,6 +167,12 @@ export class StrandWriter {
     if (heapWrite !== heapCommit) {
       Atomics.store(this.ctrl, CTRL_HEAP_WRITE, heapCommit);
     }
+
+    // Mark the buffer as owned by an initializing producer. This distinguishes
+    // STATUS_INITIALIZING (alive, not yet writing) from STATUS_EOS / STATUS_ERROR
+    // left behind by a previous run. The consumer can check status when seq=0
+    // and know whether to wait or give up.
+    Atomics.store(this.ctrl, CTRL_STATUS, STATUS_INITIALIZING);
   }
 
   // ── writeRecordBatch ──────────────────────────────────────────────────────
@@ -285,7 +291,7 @@ export class StrandWriter {
    * attempt to read during the transition.
    */
   reset(): void {
-    Atomics.store(this.ctrl, CTRL_STATUS,      STATUS_IDLE);
+    Atomics.store(this.ctrl, CTRL_STATUS,      STATUS_INITIALIZING);
     Atomics.store(this.ctrl, CTRL_WRITE_SEQ,   0);
     Atomics.store(this.ctrl, CTRL_COMMIT_SEQ,  0);
     Atomics.store(this.ctrl, CTRL_READ_CURSOR, 0);
@@ -311,15 +317,24 @@ export class StrandWriter {
     records: WritableRecord[],
   ): Array<Map<string, Uint8Array>> {
     const result: Array<Map<string, Uint8Array>> = [];
-    const utf8Fields = this.map.schema.fields.filter(f => f.type === 'utf8');
+    const varLenFields = this.map.schema.fields.filter(
+      f => f.type === 'utf8' || f.type === 'json',
+    );
 
     for (let i = 0; i < records.length; i++) {
       const record  = records[i]!;
       const encoded = new Map<string, Uint8Array>();
       let   totalHeapBytes = 0;
 
-      for (const field of utf8Fields) {
-        const value = record[field.name];
+      for (const field of varLenFields) {
+        const rawValue = record[field.name];
+
+        // For json fields, serialize the value to a JSON string first.
+        // JSON.stringify(undefined | function | symbol) returns undefined —
+        // treat those as empty (null read-back on the consumer side).
+        const value = field.type === 'json'
+          ? (rawValue == null ? '' : (JSON.stringify(rawValue) ?? ''))
+          : rawValue;
 
         if (value === null || value === undefined || value === '') {
           encoded.set(field.name, new Uint8Array(0));
@@ -352,7 +367,7 @@ export class StrandWriter {
       // even starting at the ring origin there isn't enough contiguous space.
       if (totalHeapBytes > this.map.heap_capacity) {
         throw new StrandCapacityError(
-          `Record ${i} requires ${totalHeapBytes} total heap bytes across its utf8 ` +
+          `Record ${i} requires ${totalHeapBytes} total heap bytes across its utf8/json ` +
           `fields, which exceeds heap_capacity (${this.map.heap_capacity} bytes). ` +
           `Increase heap_capacity in computeStrandMap(), ` +
           `or split the record into smaller chunks.`,
@@ -475,7 +490,10 @@ export class StrandWriter {
           this.data.setUint32(offset, toUint32(value, field.name), true);
           break;
 
-        case 'utf8': {
+        case 'utf8':
+        case 'json': {
+          // json fields are pre-serialized to UTF-8 JSON text in encodeHeapFields().
+          // The wire format is identical to utf8: [heap_offset: u32][heap_len: u16].
           const encoded = heapFields.get(field.name) ?? new Uint8Array(0);
           const { heapOffset, physOffset } = this.claimHeap(encoded.length);
 
