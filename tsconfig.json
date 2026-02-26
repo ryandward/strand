@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target":           "ES2022",
+    // ES2024: required for Atomics.waitAsync (lib.es2024.atomics.d.ts)
+    // DOM:    required for TextEncoder/TextDecoder type definitions
+    //         (runtime availability is guaranteed in all targets — browser,
+    //         Node.js 11+, and Web Workers — the DOM lib here is types-only)
+    "lib":              ["ES2024", "DOM"],
+    "module":           "ESNext",
+    "moduleResolution": "bundler",
+    "strict":           true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess":   true,
+    "declaration":      true,
+    "declarationMap":   true,
+    "outDir":           "./dist",
+    "noEmit":           true,
+    "skipLibCheck":     true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
