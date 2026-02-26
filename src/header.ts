@@ -348,6 +348,30 @@ export function readStrandHeader(sab: SharedArrayBuffer): StrandMap {
     );
   }
 
+  // ── Stride coherence ───────────────────────────────────────────────────────
+  //
+  // decodeSchema() recomputes record_stride from field layout (high-water mark
+  // of byteOffset + field_width, padded to 4 bytes). The geometry section
+  // stores the stride independently. They must agree.
+  //
+  // A mismatch means either:
+  //   a) A hand-crafted BinarySchemaDescriptor set record_stride < field layout
+  //      (stride overflow — fields alias adjacent slots), or
+  //   b) The geometry section was corrupted after initStrandHeader ran (caught
+  //      by the CRC above for most cases, but the schema bytes are not CRC'd).
+  //
+  // If the decoded stride is larger, a writer using the geometry stride would
+  // write slots too close together and a reader at byteOffset would alias into
+  // the next slot — silent memory corruption.
+
+  if (schema.record_stride !== record_stride) {
+    throw new StrandHeaderError(
+      `Schema stride mismatch: geometry header stores record_stride=${record_stride}, ` +
+      `but field layout implies record_stride=${schema.record_stride}. ` +
+      `The header is corrupt or was written with a hand-crafted schema descriptor.`,
+    );
+  }
+
   // ── Reconstruct StrandMap ──────────────────────────────────────────────────
 
   return {
@@ -385,6 +409,22 @@ export function computeStrandMap(params: {
   if (!isPowerOfTwo(index_capacity)) {
     throw new StrandHeaderError(
       `index_capacity must be a power of 2; got ${index_capacity}.`,
+    );
+  }
+
+  if (query.start > query.end) {
+    throw new RangeError(
+      `query.start (${query.start}) must be ≤ query.end (${query.end}). ` +
+      `A negative-length interval is not representable.`,
+    );
+  }
+
+  const hasVarLen = schema.fields.some(f => f.type === 'utf8' || f.type === 'json');
+  if (hasVarLen && heap_capacity === 0) {
+    throw new RangeError(
+      `Schema contains variable-length fields (utf8/json) but heap_capacity is 0. ` +
+      `claimHeap() would compute heapWrite % 0 = NaN, silently aliasing all ` +
+      `heap pointers to physOffset 0. Set heap_capacity > 0.`,
     );
   }
 

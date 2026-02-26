@@ -267,9 +267,14 @@ export class StrandWriter {
    * Mark the stream as complete. No more records will be written.
    * Wakes the consumer so it can detect end-of-stream without waiting
    * for a timeout.
+   *
+   * Uses Atomics.compareExchange to only transition STREAMING → EOS.
+   * If the status is already STATUS_ERROR (abort() raced finalize(), or the
+   * consumer signalled an abort), the CAS fails silently — ERROR is terminal
+   * and cannot be retroactively declared clean.
    */
   finalize(): void {
-    Atomics.store(this.ctrl, CTRL_STATUS, STATUS_EOS);
+    Atomics.compareExchange(this.ctrl, CTRL_STATUS, STATUS_STREAMING, STATUS_EOS);
     Atomics.notify(this.ctrl, CTRL_COMMIT_SEQ, 1);
   }
 
