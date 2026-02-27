@@ -727,6 +727,24 @@ export class StrandView {
    * Always fires Atomics.notify on CTRL_READ_CURSOR to wake a stalled producer
    * regardless of which cursor was advanced.
    *
+   * **REQUIRED in the drain loop — even for filtered records.**
+   *
+   * Call this unconditionally for every record consumed, regardless of whether
+   * the record passed a filter or was skipped. The ring only advances when the
+   * read cursor advances. If you omit this call, or call it only for records
+   * that pass a filter, the producer will stall once the ring fills (when
+   * total committed records exceed `index_capacity`) and the consumer will
+   * deadlock waiting for more commits.
+   *
+   * Correct pattern:
+   * ```
+   * for (; seq < count; seq++) {
+   *   cursor.seek(seq);
+   *   if (cursor.getF32('score')! > threshold) render(cursor); // optional filter
+   * }
+   * view.acknowledgeRead(count); // ← outside the loop, acknowledges ALL records
+   * ```
+   *
    * Only call this after you are done reading all records up to (not including)
    * `upTo`. Do not call with a value higher than committedCount.
    */

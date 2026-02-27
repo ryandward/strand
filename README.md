@@ -185,11 +185,55 @@ view.updateInternTable(['type-a', 'type-b', 'type-c', 'type-d']);
 
 ## Production guidance
 
+### `acknowledgeRead()` is required — deadlock warning
+
+`acknowledgeRead(count)` must be called in the drain loop **for every record, including filtered ones**. The ring only advances when the read cursor advances. If you call it only for records that pass a filter, or move it outside the loop with an incorrect value, the producer stalls once the ring fills and the consumer deadlocks waiting for more commits.
+
+```typescript
+// WRONG — deadlocks when total_hits > index_capacity
+let hits = 0;
+for (; seq < count; seq++) {
+  cursor.seek(seq);
+  if (cursor.getF32('score')! > threshold) {
+    render(cursor);
+    hits++;
+  }
+}
+view.acknowledgeRead(hits); // ← only acknowledges filtered subset
+
+// RIGHT — acknowledges all records regardless of filter
+for (; seq < count; seq++) {
+  cursor.seek(seq);
+  if (cursor.getF32('score')! > threshold) render(cursor);
+}
+view.acknowledgeRead(count); // ← must equal total consumed, not rendered
+```
+
+When running producer and consumer concurrently, connect them with `Promise.all` so
+a stream error in either propagates correctly:
+
+```typescript
+async function drain() {
+  let seq = 0;
+  while (true) {
+    const count = await view.waitForCommit(seq);
+    for (; seq < count; seq++) {
+      cursor.seek(seq);
+      render(cursor);
+    }
+    view.acknowledgeRead(count); // ← unconditional, every record
+    if (view.status === 'eos') break;
+  }
+}
+
+await Promise.all([streamWorker.run(), drain()]);
+```
+
 ### Progress tracking
 
 Track progress against **raw write rate**, not filtered output.
 
-`view.committedCount` increments for every record the producer writes, regardless of whether the consumer renders it. Tie your progress bar to `acknowledgeRead()` calls divided by `map.estimated_records`. Do not filter commits before incrementing the counter — that discards reads the ring still needs to release.
+`view.committedCount` increments for every record the producer writes, regardless of whether the consumer renders it. Tie your progress bar to `acknowledgeRead()` calls divided by `map.estimated_records`.
 
 ```typescript
 for (; seq < count; seq++) {
