@@ -295,6 +295,179 @@ export class StrandWriter {
     Atomics.notify(this.ctrl, CTRL_COMMIT_SEQ, 1);
   }
 
+  // ── WASM Write Interface ──────────────────────────────────────────────────
+  //
+  // The claim/commit protocol lets any code holding a SAB reference (WASM
+  // linear memory, typed-array views, native extensions) write directly into
+  // ring slots without crossing the JS serialization layer on every record.
+  //
+  // Protocol (fixed-width fields):
+  //   1. const { slotOffset, seq } = writer.claimSlot()
+  //   2. [write fields: new DataView(sab).setUint32(slotOffset + byteOffset, v, true)]
+  //   3. writer.commitSlot(seq)
+  //
+  // Protocol (variable-length fields):
+  //   1. const { slotOffset, seq }       = writer.claimSlot()
+  //   2. const { physOffset, monoOffset } = writer.claimHeapBytes(byteLen)
+  //   3. [write string: new Uint8Array(sab, heapStart + physOffset, byteLen).set(bytes)]
+  //   4. [store heap pointer: setUint32(slotOffset + field.byteOffset, monoOffset, true)]
+  //   5. [store heap length:  setUint16(slotOffset + field.byteOffset + 4, byteLen, true)]
+  //   6. writer.commitHeap()
+  //   7. writer.commitSlot(seq)
+  //
+  // For batch writes: claimSlots(N) + commitSlots(fromSeq, N).
+
+  /**
+   * Claim one ring slot and return its absolute SAB byte offset.
+   *
+   * Blocks for backpressure if the ring is full (same semantics as
+   * writeRecordBatch). Zero-fills the null bitmap bytes at the slot start.
+   *
+   * @returns { slotOffset } — absolute byte in the SAB where the record
+   *          starts. Write field values at slotOffset + field.byteOffset.
+   *          { seq } — sequence number; pass to commitSlot() when done.
+   */
+  claimSlot(): { slotOffset: number; seq: number } {
+    const status = Atomics.load(this.ctrl, CTRL_STATUS);
+    if (status === STATUS_ERROR) {
+      throw new Error('Cannot write to an errored Strand buffer. Call reset() to start fresh.');
+    }
+    if (status === STATUS_EOS) {
+      throw new Error('Cannot write after finalize(). Call reset() to start fresh.');
+    }
+
+    this.waitForIndexSpace(1);
+
+    const seq        = Atomics.add(this.ctrl, CTRL_WRITE_SEQ, 1);
+    const slot       = seq & (this.map.index_capacity - 1);
+    const slotOffset = INDEX_START + slot * this.map.record_stride;
+
+    // Zero-fill null bitmap bytes — a slot reused from a ring lap may have
+    // stale bits set. The caller sets bits for nullable fields that it writes.
+    if (this.bitmapBytes > 0) {
+      for (let b = 0; b < this.bitmapBytes; b++) {
+        this.data.setUint8(slotOffset + b, 0);
+      }
+    }
+
+    return { slotOffset, seq };
+  }
+
+  /**
+   * Commit a single slot claimed with claimSlot().
+   *
+   * Asserts seq === current COMMIT_SEQ — slots must be committed in claim
+   * order to keep the consumer's visibility fence contiguous.
+   *
+   * @throws RangeError if seq is not the next expected commit position.
+   */
+  commitSlot(seq: number): void {
+    const current = Atomics.load(this.ctrl, CTRL_COMMIT_SEQ);
+    if (seq !== current) {
+      throw new RangeError(
+        `commitSlot(${seq}): out-of-order commit. ` +
+        `Expected seq ${current}. ` +
+        `Slots must be committed in the order they were claimed.`,
+      );
+    }
+    Atomics.store(this.ctrl, CTRL_HEAP_COMMIT, Atomics.load(this.ctrl, CTRL_HEAP_WRITE));
+    Atomics.store(this.ctrl, CTRL_COMMIT_SEQ, seq + 1);
+    Atomics.notify(this.ctrl, CTRL_COMMIT_SEQ, 1);
+  }
+
+  /**
+   * Claim `count` ring slots in one atomic operation.
+   *
+   * Returns an array of { slotOffset, seq } — one entry per slot, in order.
+   * Zero-fills the null bitmap bytes in each slot.
+   *
+   * Use commitSlots(claims[0].seq, count) to commit the full batch.
+   */
+  claimSlots(count: number): ReadonlyArray<{ slotOffset: number; seq: number }> {
+    if (count <= 0) return [];
+
+    const status = Atomics.load(this.ctrl, CTRL_STATUS);
+    if (status === STATUS_ERROR) {
+      throw new Error('Cannot write to an errored Strand buffer. Call reset() to start fresh.');
+    }
+    if (status === STATUS_EOS) {
+      throw new Error('Cannot write after finalize(). Call reset() to start fresh.');
+    }
+
+    this.waitForIndexSpace(count);
+
+    const batchStart = Atomics.add(this.ctrl, CTRL_WRITE_SEQ, count);
+    const claims: Array<{ slotOffset: number; seq: number }> = [];
+
+    for (let i = 0; i < count; i++) {
+      const seq        = batchStart + i;
+      const slot       = seq & (this.map.index_capacity - 1);
+      const slotOffset = INDEX_START + slot * this.map.record_stride;
+
+      if (this.bitmapBytes > 0) {
+        for (let b = 0; b < this.bitmapBytes; b++) {
+          this.data.setUint8(slotOffset + b, 0);
+        }
+      }
+
+      claims.push({ slotOffset, seq });
+    }
+
+    return claims;
+  }
+
+  /**
+   * Atomically commit `count` slots previously claimed with claimSlots().
+   *
+   * Asserts fromSeq === current COMMIT_SEQ (ordering guard).
+   *
+   * @throws RangeError if fromSeq is not the next expected commit position.
+   */
+  commitSlots(fromSeq: number, count: number): void {
+    const current = Atomics.load(this.ctrl, CTRL_COMMIT_SEQ);
+    if (fromSeq !== current) {
+      throw new RangeError(
+        `commitSlots(${fromSeq}, ${count}): out-of-order commit. ` +
+        `Expected fromSeq ${current}. ` +
+        `Slots must be committed in the order they were claimed.`,
+      );
+    }
+    Atomics.store(this.ctrl, CTRL_HEAP_COMMIT, Atomics.load(this.ctrl, CTRL_HEAP_WRITE));
+    Atomics.store(this.ctrl, CTRL_COMMIT_SEQ, fromSeq + count);
+    Atomics.notify(this.ctrl, CTRL_COMMIT_SEQ, 1);
+  }
+
+  /**
+   * Claim `byteLen` bytes in the heap ring for a variable-length field.
+   *
+   * Handles the heap ring boundary (skip sentinel) transparently.
+   *
+   * @returns { physOffset } — physical SAB byte offset relative to heap start.
+   *          Write string bytes at sab[heapStart + physOffset ... + byteLen].
+   *          { monoOffset } — monotonic cursor value to store in the index
+   *          record's heap_offset u32 (field.byteOffset + 0).
+   *
+   * Wire format for utf8/json fields in the index record:
+   *   [monoOffset: u32 at field.byteOffset]
+   *   [byteLen:    u16 at field.byteOffset + 4]
+   */
+  claimHeapBytes(byteLen: number): { physOffset: number; monoOffset: number } {
+    const { heapOffset, physOffset } = this.claimHeap(byteLen);
+    return { physOffset, monoOffset: heapOffset };
+  }
+
+  /**
+   * Advance CTRL_HEAP_COMMIT to match the current CTRL_HEAP_WRITE.
+   *
+   * Call this after all claimHeapBytes() + heap writes for a slot or batch,
+   * and before the corresponding commitSlot() / commitSlots(). This ensures
+   * diagnostic heap scanners see a consistent committed range, and preserves
+   * the ordering invariant: HEAP_COMMIT is stable before COMMIT_SEQ advances.
+   */
+  commitHeap(): void {
+    Atomics.store(this.ctrl, CTRL_HEAP_COMMIT, Atomics.load(this.ctrl, CTRL_HEAP_WRITE));
+  }
+
   /**
    * Flush all ring cursors to zero for a new query on the same buffer.
    *
