@@ -1,4 +1,4 @@
-# Strand Wire Protocol — Version 3
+# Strand Wire Protocol — Version 4
 
 **Scope:** Everything a non-TypeScript producer (Rust, WASM, C, Python) needs to write
 correct Strand records into a `SharedArrayBuffer` without reading the TypeScript source.
@@ -16,21 +16,22 @@ only the producer-observable binary contract.
 3. [Header — static section](#3-header--static-section)
 4. [Header — Atomics control words](#4-header--atomics-control-words)
 5. [Header — schema section](#5-header--schema-section)
-6. [Schema binary encoding](#6-schema-binary-encoding)
-7. [FNV-1a 32-bit hash](#7-fnv-1a-32-bit-hash)
-8. [Field type tags and wire widths](#8-field-type-tags-and-wire-widths)
-9. [Field flags](#9-field-flags)
-10. [Null validity bitmap](#10-null-validity-bitmap)
-11. [Index region — record slot layout](#11-index-region--record-slot-layout)
-12. [Heap region — variable-length payloads](#12-heap-region--variable-length-payloads)
-13. [Heap skip sentinel](#13-heap-skip-sentinel)
-14. [Heap alignment for typed arrays](#14-heap-alignment-for-typed-arrays)
-15. [Write protocol — step-by-step](#15-write-protocol--step-by-step)
-16. [Backpressure](#16-backpressure)
-17. [Lifecycle state machine](#17-lifecycle-state-machine)
-18. [Abort protocol](#18-abort-protocol)
-19. [Validation on attach](#19-validation-on-attach)
-20. [Magic and version constants](#20-magic-and-version-constants)
+6. [Header — producer metadata (v4)](#6-header--producer-metadata-v4)
+7. [Schema binary encoding](#7-schema-binary-encoding)
+8. [FNV-1a 32-bit hash](#8-fnv-1a-32-bit-hash)
+9. [Field type tags and wire widths](#9-field-type-tags-and-wire-widths)
+10. [Field flags](#10-field-flags)
+11. [Null validity bitmap](#11-null-validity-bitmap)
+12. [Index region — record slot layout](#12-index-region--record-slot-layout)
+13. [Heap region — variable-length payloads](#13-heap-region--variable-length-payloads)
+14. [Heap skip sentinel](#14-heap-skip-sentinel)
+15. [Heap alignment for typed arrays](#15-heap-alignment-for-typed-arrays)
+16. [Write protocol — step-by-step](#16-write-protocol--step-by-step)
+17. [Backpressure](#17-backpressure)
+18. [Lifecycle state machine](#18-lifecycle-state-machine)
+19. [Abort protocol](#19-abort-protocol)
+20. [Validation on attach](#20-validation-on-attach)
+21. [Magic and version constants](#21-magic-and-version-constants)
 
 ---
 
@@ -84,7 +85,7 @@ and never modified. All values are little-endian `u32`.
 |-------------|------|------------------|----------------------------------------------------------|
 | 0           | u32  | `magic`          | `0x5354524E` — bytes `'N'`, `'R'`, `'T'`, `'S'` in LE  |
 | 4           | u32  | `version`        | `3` for this document                                    |
-| 8           | u32  | `schema_fp`      | FNV-1a 32-bit of the binary schema encoding (§6, §7)    |
+| 8           | u32  | `schema_fp`      | FNV-1a 32-bit of the binary schema encoding (§7, §8)    |
 | 12          | u32  | `record_stride`  | Byte length of one index record slot, 4-byte aligned     |
 | 16          | u32  | `index_capacity` | Ring capacity in records; must be a power of 2           |
 | 20          | u32  | `heap_capacity`  | Heap region size in bytes                                |
@@ -111,7 +112,7 @@ Int32Array index | Byte offset | Name              | Owner      | Role
 7                | 28          | WRITE_SEQ         | Producer   | Next sequence number to claim
 8                | 32          | COMMIT_SEQ        | Producer   | Highest committed sequence number
 9                | 36          | READ_CURSOR       | Consumer   | Global acknowledged read position
-10               | 40          | STATUS            | Producer   | Stream lifecycle state (§17)
+10               | 40          | STATUS            | Producer   | Stream lifecycle state (§18)
 11               | 44          | HEAP_WRITE        | Producer   | Monotonic heap write cursor (bytes)
 12               | 48          | HEAP_COMMIT       | Producer   | Monotonic heap commit cursor (bytes)
 13               | 52          | ABORT             | Consumer   | Set to 1 to request abort
@@ -134,7 +135,7 @@ until `COMMIT_SEQ` is advanced to `seq + 1`.
 (including heap commits) for that record are complete.
 
 **READ_CURSOR** tracks how many records the consumer has finished processing. The
-producer subtracts this from `WRITE_SEQ` to detect a full ring (§16).
+producer subtracts this from `WRITE_SEQ` to detect a full ring (§17).
 
 **Consumer slots** (indices 14–21) are used in multi-consumer mode. Unoccupied slots
 hold `0x7FFFFFFF`. A consumer claims a slot by CAS from `0x7FFFFFFF` to its current
@@ -153,12 +154,49 @@ Bytes 88–511 hold the binary-encoded schema descriptor.
 | 92          | …    | schema bytes      | `schema_byte_len` bytes; up to 420 bytes total |
 | 92 + len    | …    | (unused)          | Zeroed by `initStrandHeader()`                 |
 
-The binary schema encoding is described in §6. The FNV-1a hash of these bytes
+The binary schema encoding is described in §7. The FNV-1a hash of these bytes
 (not including `schema_byte_len`) is `schema_fp` (stored at byte 8).
 
 ---
 
-## 6. Schema binary encoding
+## 6. Header — producer metadata (v4)
+
+Immediately after the schema bytes in the unused header tail there is an optional
+producer metadata region. It is absent if `meta_byte_len == 0`.
+
+```
+byte offset                      field
+───────────────────────────────────────────────────────────────────────
+92 + schema_byte_len             meta_byte_len  u32, LE
+92 + schema_byte_len + 4         meta_bytes     meta_byte_len × u8, UTF-8 JSON
+92 + schema_byte_len + 4 + len   (unused, zeroed by SharedArrayBuffer allocation)
+```
+
+Constraint: `92 + schema_byte_len + 4 + meta_byte_len ≤ 512`.
+
+A producer that has no metadata to pass must still write `meta_byte_len = 0` at
+`92 + schema_byte_len`. This lets `readStrandHeader()` distinguish "no metadata"
+from "metadata region not written at all". (SharedArrayBuffer bytes are zeroed on
+allocation, so a reader on a freshly initialized SAB will see 0 even without an
+explicit write — but explicit zeroing is safer for re-used memory.)
+
+**Typical use:** A Rust/WASM producer places the intern table for `utf8_ref` fields
+here so the TypeScript consumer does not need a separate JSON side-channel:
+
+```json
+{
+  "internTable": ["chr1", "chr2", "chr3", "chrX", "chrY", "chrM"],
+  "query": { "assembly": "hg38", "chrom": "chr1", "start": 0, "end": 248956422 }
+}
+```
+
+`readStrandHeader()` (and `new StrandView()`) parse this payload with `JSON.parse`
+and expose it as `StrandMap.meta`. A corrupt but non-empty metadata payload is
+silently ignored (`meta` is absent); the rest of the header is unaffected.
+
+---
+
+## 7. Schema binary encoding
 
 All values little-endian. This is the canonical input for FNV-1a fingerprinting.
 
@@ -166,8 +204,8 @@ All values little-endian. This is the canonical input for FNV-1a fingerprinting.
 [field_count: u16]
 
 For each field (in schema declaration order):
-  [type_tag:    u8]           — see §8
-  [flags:       u8]           — see §9
+  [type_tag:    u8]           — see §9
+  [flags:       u8]           — see §10
   [byte_offset: u16]          — field's start byte within the fixed-width record slot
   [name_len:    u8]           — UTF-8 byte length of the field name
   [name_bytes:  name_len × u8]
@@ -184,11 +222,11 @@ the record slot.
 The order of fields in the encoding is the schema declaration order. `buildSchema()`
 in `@strand/core` assigns `byte_offset` values using this alignment rule: each field
 is aligned to `min(field_byte_width, 4)` bytes, laid out in declaration order after
-any null validity bitmap bytes at the start of the slot (§10).
+any null validity bitmap bytes at the start of the slot (§11).
 
 ---
 
-## 7. FNV-1a 32-bit hash
+## 8. FNV-1a 32-bit hash
 
 Used for both `schema_fp` (fingerprint of schema binary encoding) and `header_crc`
 (checksum of header geometry bytes 0–23).
@@ -211,7 +249,7 @@ stays within 32-bit integer semantics regardless of V8's internal float represen
 
 ---
 
-## 8. Field type tags and wire widths
+## 9. Field type tags and wire widths
 
 Each field in the schema has a type tag (u8) and a fixed byte width inside the index
 record slot. The type tag is stored in the schema binary encoding and validated on
@@ -252,13 +290,13 @@ Tags 14–255 are reserved. A reader encountering an unknown tag must reject the
 
 ---
 
-## 9. Field flags
+## 10. Field flags
 
 Flags is a bitmask (u8) stored in the schema binary encoding.
 
 | Bit | Mask | Name                | Meaning                                                              |
 |-----|------|---------------------|----------------------------------------------------------------------|
-| 0   | 0x01 | `FIELD_FLAG_NULLABLE`    | Field may be absent in a record; null tracked by validity bitmap (§10) |
+| 0   | 0x01 | `FIELD_FLAG_NULLABLE`    | Field may be absent in a record; null tracked by validity bitmap (§11) |
 | 1   | 0x02 | `FIELD_FLAG_SORTED_ASC`  | Values are monotonically non-decreasing across committed records     |
 | 2   | 0x04 | `FIELD_FLAG_SORTED_DESC` | Values are monotonically non-increasing across committed records     |
 
@@ -270,7 +308,7 @@ silent incorrect binary search results — no runtime enforcement exists.
 
 ---
 
-## 10. Null validity bitmap
+## 11. Null validity bitmap
 
 When a schema contains one or more `FIELD_FLAG_NULLABLE` fields, each record slot
 begins with a null validity bitmap.
@@ -302,7 +340,7 @@ write; producers must not leave stale values from a prior lap in the ring).
 
 ---
 
-## 11. Index region — record slot layout
+## 12. Index region — record slot layout
 
 The index region starts at byte offset `512` and contains `index_capacity` slots of
 `record_stride` bytes each.
@@ -320,7 +358,7 @@ are padding (value is unspecified; readers must not interpret them).
 
 **Zeroing requirement:** Before writing any fields into a slot, the producer must
 zero the entire slot. This is required because:
-1. The null validity bitmap must start at zero (§10).
+1. The null validity bitmap must start at zero (§11).
 2. The same physical slot is reused across ring laps.
 
 A producer may omit zeroing only if it writes every byte of every field on every
@@ -328,7 +366,7 @@ record, but zeroing is the safe default.
 
 ---
 
-## 12. Heap region — variable-length payloads
+## 13. Heap region — variable-length payloads
 
 The heap region is a circular byte ring used for all heap-backed field types.
 
@@ -347,7 +385,7 @@ To claim `N` bytes:
 1. Atomically add `N` to `HEAP_WRITE` and capture the old value as `heap_offset`.
 2. Compute `phys_offset = heap_offset % heap_capacity`.
 3. Write `N` bytes starting at SAB byte `heap_start + phys_offset`.
-4. Advance `HEAP_COMMIT` to match `HEAP_WRITE` (§15 step 5).
+4. Advance `HEAP_COMMIT` to match `HEAP_WRITE` (§16 step 6).
 5. Store `heap_offset` and `N` as the 6-byte pointer in the index record.
 
 **`HEAP_COMMIT`** (Atomics index 12) is the consumer visibility fence for heap data.
@@ -356,12 +394,12 @@ A producer advances `HEAP_COMMIT` after writing all heap payloads for a record b
 before advancing `COMMIT_SEQ`.
 
 **Ring wrap:** When the remaining space before the physical end of the heap is less
-than the payload size, the producer must write a skip sentinel (§13) and continue
+than the payload size, the producer must write a skip sentinel (§14) and continue
 from physical offset 0.
 
 ---
 
-## 13. Heap skip sentinel
+## 14. Heap skip sentinel
 
 When a payload would extend past `heap_capacity`, the producer writes a skip sentinel
 at the current physical position and then writes the payload starting at physical
@@ -397,7 +435,7 @@ case.
 
 ---
 
-## 14. Heap alignment for typed arrays
+## 15. Heap alignment for typed arrays
 
 `i32_array` (tag 12) and `f32_array` (tag 13) payloads must start at a **4-byte-aligned**
 physical heap offset (`phys_offset % 4 == 0`). Constructing a `Float32Array` or
@@ -414,7 +452,7 @@ if misalign != 0:
         advance HEAP_WRITE by pad      # skip pad bytes; phys_cursor is now aligned
     else:
         # padding itself crosses the ring boundary
-        write skip sentinel (§13)      # lands at phys_cursor = 0, which is always aligned
+        write skip sentinel (§14)      # lands at phys_cursor = 0, which is always aligned
 ```
 
 **Why phys_offset = 0 is always 4-byte aligned:**
@@ -430,7 +468,7 @@ and `Float32Array`.
 
 ---
 
-## 15. Write protocol — step-by-step
+## 16. Write protocol — step-by-step
 
 This is the sequence a producer follows for each record (or batch of records).
 All `Atomics` operations target the `Int32Array` view starting at SAB byte 0.
@@ -438,7 +476,7 @@ All `Atomics` operations target the `Int32Array` view starting at SAB byte 0.
 ### Claim phase
 
 ```
-1. (Backpressure check — see §16.)
+1. (Backpressure check — see §17.)
 
 2. seq ← Atomics.add(ctrl, WRITE_SEQ, 1)
    # Returns the old value. The producer now owns slot (seq & (index_capacity - 1)).
@@ -457,12 +495,12 @@ All `Atomics` operations target the `Int32Array` view starting at SAB byte 0.
           Write value at SAB[slot_byte_offset + field.byte_offset], LE.
 
      b. Heap-backed fields (utf8, json, bytes, i32_array, f32_array):
-          i.  Apply alignment padding if required (§14 for i32_array, f32_array).
+          i.  Apply alignment padding if required (§15 for i32_array, f32_array).
           ii. heap_offset ← Atomics.add(ctrl, HEAP_WRITE, payload_byte_len)
               phys_offset ← heap_offset % heap_capacity
               remaining   ← heap_capacity - phys_offset
               if payload_byte_len > remaining:
-                  write skip sentinel at heap_start + phys_offset (§13)
+                  write skip sentinel at heap_start + phys_offset (§14)
                   Atomics.add(ctrl, HEAP_WRITE, remaining)
                   heap_offset_final ← Atomics.load(ctrl, HEAP_WRITE)
                   Atomics.add(ctrl, HEAP_WRITE, payload_byte_len)
@@ -474,7 +512,7 @@ All `Atomics` operations target the `Int32Array` view starting at SAB byte 0.
                at SAB[slot_byte_offset + field.byte_offset].
 
      c. Nullable fields:
-          For each nullable field written (value present), set its validity bit (§10).
+          For each nullable field written (value present), set its validity bit (§11).
           Omitted nullable fields: leave bit 0, leave field bytes zeroed.
 
 6. Advance heap commit fence:
@@ -500,7 +538,7 @@ the whole batch is written.
 
 ---
 
-## 16. Backpressure
+## 17. Backpressure
 
 The ring holds at most `index_capacity` records that have been committed but not yet
 acknowledged by the consumer. When the ring is full, the producer must block.
@@ -556,7 +594,7 @@ The consumer advances `READ_CURSOR` by calling `acknowledgeRead(n)`, which sets
 
 ---
 
-## 17. Lifecycle state machine
+## 18. Lifecycle state machine
 
 `CTRL_STATUS` (Int32Array index 10) encodes the stream lifecycle.
 
@@ -580,7 +618,7 @@ A consumer polling `STATUS` should use `Atomics.load` and call `Atomics.waitAsyn
 
 ---
 
-## 18. Abort protocol
+## 19. Abort protocol
 
 Either side may abort the stream.
 
@@ -602,7 +640,7 @@ fields are preserved).
 
 ---
 
-## 19. Validation on attach
+## 20. Validation on attach
 
 A producer or consumer attaching to an existing SAB must validate the header before
 using any geometry values. Validation order:
@@ -614,7 +652,7 @@ using any geometry values. Validation order:
    corrupted geometry fields.
 5. **Schema byte len:** bytes 88–91 as u32 LE. Must be `>= 2` (minimum: 2-byte
    field_count) and `<= 420`.
-6. **Schema decode:** parse the binary schema encoding (§6) from bytes 92 through
+6. **Schema decode:** parse the binary schema encoding (§7) from bytes 92 through
    `92 + schema_byte_len`. Reject if truncated or contains unknown type tags.
 7. **Schema fingerprint:** recompute FNV-1a of the schema bytes and compare to
    bytes 8–11. Rejects schema descriptor corruption.
@@ -624,11 +662,11 @@ using any geometry values. Validation order:
 
 ---
 
-## 20. Magic and version constants
+## 21. Magic and version constants
 
 ```
 STRAND_MAGIC    = 0x5354524E   ('STRN' in little-endian ASCII)
-STRAND_VERSION  = 3
+STRAND_VERSION  = 4
 HEADER_SIZE     = 512
 INDEX_START     = 512
 MAX_SCHEMA_BYTES = 420         (512 − 92)

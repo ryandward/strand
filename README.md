@@ -283,8 +283,8 @@ If the producer materializes everything first, backpressure cannot slow the upst
 
 | Function | Description |
 |----------|-------------|
-| `initStrandHeader(sab, map)` | Write magic, version, geometry, CRC, and schema into a fresh SAB |
-| `readStrandHeader(sab)` | Validate magic → CRC → schema; returns `StrandMap` or throws `StrandHeaderError` |
+| `initStrandHeader(sab, map, meta?)` | Write magic, version, geometry, CRC, schema, and optional metadata into a fresh SAB |
+| `readStrandHeader(sab)` | Validate magic → CRC → schema; returns `StrandMap` (with `.meta` if present) or throws `StrandHeaderError` |
 
 ### Producer — `StrandWriter`
 
@@ -323,6 +323,7 @@ For producers that hold a direct SAB reference (WASM linear memory, native exten
 | `updateInternTable(table)` | Replace the `utf8_ref` intern table; all allocated cursors observe the change immediately |
 | `committedCount` | `Atomics.load(COMMIT_SEQ)` — records safe to read |
 | `status` | `'initializing' \| 'streaming' \| 'eos' \| 'error'` |
+| `map.meta` | Optional producer metadata parsed from header (v4+). `undefined` if not supplied. |
 
 ### Consumer — `RecordCursor`
 

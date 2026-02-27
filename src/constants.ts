@@ -28,9 +28,15 @@
  *             Each slot holds the ack position for one registered consumer.
  *             CONSUMER_SLOT_VACANT (INT32_MAX) means the slot is unoccupied.
  *
- *   ── Schema section (DataView reads) ────────────────────────────────────
+ *   ── Schema + metadata section (DataView reads) ──────────────────────────
  *   [88..91]  schema_byte_len  u32
- *   [92..511] binary schema descriptor (up to 420 bytes)
+ *   [92..92+schema_byte_len-1]
+ *             binary schema descriptor (up to 420 bytes)
+ *   [92+schema_byte_len..92+schema_byte_len+3]
+ *             meta_byte_len    u32  = 0 if no metadata  ← v4 addition
+ *   [92+schema_byte_len+4..511]
+ *             meta_bytes       UTF-8 JSON (meta_byte_len bytes)  ← v4 addition
+ *             Constraint: 92 + schema_byte_len + 4 + meta_byte_len ≤ 512
  */
 
 // ─── Magic & Version ──────────────────────────────────────────────────────────
@@ -44,8 +50,12 @@ export const STRAND_MAGIC:   number = 0x5354524e;
  *           schema section by 8 bytes; added CTRL_ABORT.
  * v2 → v3: added 8 consumer cursor slots (bytes 56–87); shifted
  *           schema section by 32 bytes; added null validity bitmap.
+ * v3 → v4: added producer metadata region in unused header tail after schema
+ *           bytes: [meta_byte_len: u32][meta_bytes: UTF-8 JSON].
+ *           Enables non-JS producers to pass intern tables and query context
+ *           through the header without a side-channel JSON payload.
  */
-export const STRAND_VERSION: number = 3;
+export const STRAND_VERSION: number = 4;
 
 // ─── Header Layout ────────────────────────────────────────────────────────────
 

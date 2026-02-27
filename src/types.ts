@@ -155,6 +155,19 @@ export interface StrandMap {
   readonly estimated_records: number;
 
   readonly schema: BinarySchemaDescriptor;
+
+  /**
+   * Optional producer metadata stored in the header's unused tail region.
+   *
+   * Non-JS producers (Rust, WASM) can pass intern tables, query context, or
+   * any other structured data here without a side-channel JSON payload.
+   * Stored as UTF-8 JSON in bytes [92+schema_byte_len+4 .. 511] of the header.
+   *
+   * `readStrandHeader()` parses this field if present. `initStrandHeader()`
+   * writes it if a second `meta` argument is supplied. Absent on v3 and older
+   * headers, or when the producer does not supply metadata.
+   */
+  readonly meta?: unknown;
 }
 
 // ─── Stream Status ────────────────────────────────────────────────────────────

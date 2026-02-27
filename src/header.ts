@@ -95,7 +95,8 @@ function isPowerOfTwo(n: number): boolean {
  *   - sab.byteLength >= map.total_bytes
  *   - map.index_capacity is a power of 2
  *   - map.record_stride is 4-byte aligned
- *   - Binary schema fits in the 452-byte header region
+ *   - Binary schema fits in the header region (up to 420 bytes)
+ *   - If `meta` is supplied: schema + metadata must fit in the 420-byte tail
  *   - map.schema_fingerprint matches the actual fingerprint of map.schema
  *
  * Writes static fields, computes and stores header_crc, then initializes
@@ -103,9 +104,15 @@ function isPowerOfTwo(n: number): boolean {
  * semantics). Any Worker that receives this SAB via postMessage after
  * initStrandHeader returns will see the correctly initialized header.
  *
+ * @param meta  Optional producer metadata. Any JSON-serializable value.
+ *              Stored as UTF-8 JSON immediately after the schema bytes in
+ *              the unused header tail. Retrieved by readStrandHeader() as
+ *              StrandMap.meta. Use for intern tables, query context, or any
+ *              producer-side information a non-JS producer needs to pass.
+ *
  * Call this exactly once, before sharing the SAB with any Worker.
  */
-export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap): void {
+export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap, meta?: unknown): void {
 
   // ── Pre-flight: endianness ─────────────────────────────────────────────────
   //
@@ -167,7 +174,7 @@ export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap): void {
     );
   }
 
-  // ── Pre-flight: schema ─────────────────────────────────────────────────────
+  // ── Pre-flight: schema and metadata ───────────────────────────────────────
 
   const schemaBytes = encodeSchema(map.schema);
   if (schemaBytes.length > MAX_SCHEMA_BYTES) {
@@ -176,6 +183,22 @@ export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap): void {
       `maximum that fits in the header is ${MAX_SCHEMA_BYTES} bytes. ` +
       `Reduce field count or shorten field names.`,
     );
+  }
+
+  const metaEncoder = new TextEncoder();
+  const metaBytes   = meta !== undefined ? metaEncoder.encode(JSON.stringify(meta)) : null;
+  if (metaBytes !== null) {
+    // After the schema: 4 bytes for meta_byte_len + metaBytes.length for payload.
+    const metaRegionSize = 4 + metaBytes.length;
+    const schemaEnd      = OFFSET_SCHEMA_BYTES + schemaBytes.length;
+    if (schemaEnd + metaRegionSize > HEADER_SIZE) {
+      throw new StrandHeaderError(
+        `Producer metadata (${metaBytes.length} bytes JSON) does not fit in the ` +
+        `header tail after schema (${schemaBytes.length} bytes): ` +
+        `need ${schemaEnd + metaRegionSize} bytes, header is ${HEADER_SIZE}. ` +
+        `Shorten field names or reduce metadata size.`,
+      );
+    }
   }
 
   // Reject a StrandMap whose fingerprint disagrees with its schema.
@@ -214,6 +237,23 @@ export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap): void {
 
   view.setUint32(OFFSET_SCHEMA_BYTE_LEN, schemaBytes.length, true);
   new Uint8Array(sab, OFFSET_SCHEMA_BYTES, schemaBytes.length).set(schemaBytes);
+
+  // ── Write producer metadata (v4) ───────────────────────────────────────────
+  //
+  // Packed immediately after the schema bytes in the unused header tail:
+  //   [meta_byte_len: u32, LE][meta_bytes: UTF-8 JSON]
+  //
+  // If no metadata, write meta_byte_len = 0. This sentinel lets readStrandHeader
+  // distinguish "no metadata" from "metadata region not yet written" for partial
+  // writes. Bytes beyond meta_byte_len were zeroed when the SAB was allocated.
+
+  const metaOffset = OFFSET_SCHEMA_BYTES + schemaBytes.length;
+  if (metaBytes !== null && metaBytes.length > 0) {
+    view.setUint32(metaOffset, metaBytes.length, true);
+    new Uint8Array(sab, metaOffset + 4, metaBytes.length).set(metaBytes);
+  } else {
+    view.setUint32(metaOffset, 0, true);
+  }
 
   // ── Initialize Atomics control words ──────────────────────────────────────
   //
@@ -381,9 +421,31 @@ export function readStrandHeader(sab: SharedArrayBuffer): StrandMap {
     );
   }
 
+  // ── Producer metadata (v4) ────────────────────────────────────────────────
+  //
+  // Immediately after the schema bytes: [meta_byte_len: u32, LE][meta_bytes].
+  // meta_byte_len = 0 means no metadata was written.
+  // Silently ignored if the schema_byte_len leaves no room for the u32
+  // (should not happen with valid headers, but be defensive).
+
+  let meta: unknown;
+  const metaLenOffset = OFFSET_SCHEMA_BYTES + schema_byte_len;
+  if (metaLenOffset + 4 <= HEADER_SIZE) {
+    const meta_byte_len = view.getUint32(metaLenOffset, true);
+    if (meta_byte_len > 0 && metaLenOffset + 4 + meta_byte_len <= HEADER_SIZE) {
+      const metaBytes = new Uint8Array(sab, metaLenOffset + 4, meta_byte_len).slice();
+      try {
+        meta = JSON.parse(new TextDecoder().decode(metaBytes));
+      } catch {
+        // Corrupt metadata — do not throw; consumers that need meta can check it.
+        meta = undefined;
+      }
+    }
+  }
+
   // ── Reconstruct StrandMap ──────────────────────────────────────────────────
 
-  return {
+  const strandMap: StrandMap = {
     schema_fingerprint,
     record_stride,
     index_capacity,
@@ -394,6 +456,10 @@ export function readStrandHeader(sab: SharedArrayBuffer): StrandMap {
     estimated_records: 0,
     schema,
   };
+  if (meta !== undefined) {
+    return { ...strandMap, meta };
+  }
+  return strandMap;
 }
 
 // ─── computeStrandMap ─────────────────────────────────────────────────────────
