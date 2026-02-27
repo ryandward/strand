@@ -1,174 +1,278 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 490"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 478"
      font-family="system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
   <defs>
-    <marker id="ah-blue" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#2563eb"/>
+    <marker id="aw" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0,8 3,0 6" fill="#38bdf8"/>
     </marker>
-    <marker id="ah-green" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#16a34a"/>
+    <marker id="ar" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0,8 3,0 6" fill="#a78bfa"/>
     </marker>
-    <marker id="ah-gray" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#94a3b8"/>
+    <marker id="ab" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0,8 3,0 6" fill="#475569"/>
     </marker>
   </defs>
 
-  <!-- Canvas -->
-  <rect width="1100" height="490" fill="white"/>
+  <!-- ── Canvas ── -->
+  <rect width="1100" height="478" fill="#0d1117"/>
 
-  <!-- ══════════════════════════════════════════════════════════════════ -->
-  <!-- Worker Thread                                                      -->
-  <!-- ══════════════════════════════════════════════════════════════════ -->
+  <!-- ════════════════════════════════════════════════════════
+       WORKER THREAD
+       ════════════════════════════════════════════════════════ -->
+  <rect x="12" y="42" width="186" height="386" rx="8"
+        fill="#080f1f" stroke="#1d4ed8" stroke-width="1.5"/>
 
-  <rect x="20" y="60" width="170" height="310" rx="8"
-        fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <!-- corner accents -->
+  <polyline points="12,62 12,42 32,42"   fill="none" stroke="#38bdf8" stroke-width="1.5" opacity="0.6"/>
+  <polyline points="178,42 198,42 198,62" fill="none" stroke="#38bdf8" stroke-width="1.5" opacity="0.6"/>
+  <polyline points="12,408 12,428 32,428"  fill="none" stroke="#38bdf8" stroke-width="1.5" opacity="0.6"/>
+  <polyline points="178,428 198,428 198,408" fill="none" stroke="#38bdf8" stroke-width="1.5" opacity="0.6"/>
 
-  <text x="105" y="50" text-anchor="middle" font-size="12" font-weight="600" fill="#1e3a8a">Worker Thread</text>
+  <text x="105" y="33" text-anchor="middle" font-size="9.5" font-weight="700"
+        letter-spacing="0.14em" fill="#334155">WORKER THREAD</text>
 
-  <text x="105" y="91" text-anchor="middle" font-size="12" font-weight="700"
+  <text x="105" y="68" text-anchor="middle" font-size="13" font-weight="700"
         font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#1e40af">StrandWriter</text>
-  <line x1="36" y1="103" x2="174" y2="103" stroke="#93c5fd" stroke-width="1"/>
+        fill="#38bdf8">StrandWriter</text>
+  <line x1="26" y1="77" x2="184" y2="77" stroke="#1e3a8a" stroke-width="0.75"/>
 
-  <text x="105" y="121" text-anchor="middle" font-size="11"
+  <!-- Standard section -->
+  <text x="26" y="93" font-size="8" font-weight="700" letter-spacing="0.14em" fill="#334155">STANDARD</text>
+  <text x="105" y="109" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#93c5fd">begin()</text>
+  <text x="105" y="124" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#93c5fd">writeRecordBatch()</text>
+  <text x="105" y="139" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#93c5fd">finalize()  ·  abort()</text>
+  <text x="105" y="154" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#93c5fd">reset()</text>
+
+  <line x1="26" y1="164" x2="184" y2="164" stroke="#1e3a8a" stroke-width="0.75"/>
+
+  <!-- WASM section -->
+  <text x="26" y="180" font-size="8" font-weight="700" letter-spacing="0.14em" fill="#334155">WASM INTERFACE</text>
+  <text x="105" y="196" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#7dd3fc">claimSlot()</text>
+  <text x="105" y="211" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#7dd3fc">commitSlot(seq)</text>
+  <text x="105" y="226" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#7dd3fc">claimSlots(n)</text>
+  <text x="105" y="241" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#7dd3fc">commitSlots(from, n)</text>
+  <text x="105" y="256" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#7dd3fc">claimHeapBytes(n)</text>
+  <text x="105" y="271" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#7dd3fc">commitHeap()</text>
+
+  <line x1="26" y1="282" x2="184" y2="282" stroke="#1e3a8a" stroke-width="0.75"/>
+
+  <text x="105" y="299" text-anchor="middle" font-size="8.5" font-style="italic" fill="#3b4f6b">Atomics.wait — blocks on backpressure</text>
+  <text x="105" y="313" text-anchor="middle" font-size="8.5" font-style="italic" fill="#3b4f6b">StrandAbortError on consumer cancel</text>
+  <text x="105" y="327" text-anchor="middle" font-size="8.5" font-style="italic" fill="#3b4f6b">crash-safe partial-write recovery</text>
+  <text x="105" y="341" text-anchor="middle" font-size="8.5" font-style="italic" fill="#3b4f6b">multi-consumer backpressure gate</text>
+
+
+  <!-- ════════════════════════════════════════════════════════
+       SHARED ARRAY BUFFER
+       ════════════════════════════════════════════════════════ -->
+  <rect x="232" y="14" width="636" height="420" rx="8"
+        fill="#0d1117" stroke="#1e293b" stroke-width="1.5"/>
+
+  <text x="550" y="8" text-anchor="middle" font-size="9.5" font-weight="700"
+        letter-spacing="0.16em" fill="#334155">SHARED ARRAY BUFFER</text>
+
+  <!-- ── HEADER ── -->
+  <rect x="248" y="28" width="604" height="102" rx="5"
+        fill="#0d0820" stroke="#4c1d95" stroke-width="1"/>
+  <text x="550" y="48" text-anchor="middle" font-size="11" font-weight="700"
+        letter-spacing="0.08em" fill="#a78bfa">HEADER  ·  512 B</text>
+
+  <line x1="438" y1="56" x2="438" y2="122" stroke="#2e1065" stroke-width="0.75"/>
+  <line x1="662" y1="56" x2="662" y2="122" stroke="#2e1065" stroke-width="0.75"/>
+
+  <text x="343" y="68" text-anchor="middle" font-size="8.5" fill="#7c3aed">magic · version · CRC</text>
+  <text x="343" y="82" text-anchor="middle" font-size="8.5" fill="#7c3aed">record_stride · index_capacity</text>
+  <text x="343" y="96" text-anchor="middle" font-size="8.5" fill="#7c3aed">heap_capacity · schema bytes</text>
+
+  <text x="550" y="68" text-anchor="middle" font-size="8.5" fill="#7c3aed">WRITE_SEQ · COMMIT_SEQ</text>
+  <text x="550" y="82" text-anchor="middle" font-size="8.5" fill="#7c3aed">READ_CURSOR · STATUS · ABORT</text>
+  <text x="550" y="96" text-anchor="middle" font-size="8.5" fill="#7c3aed">HEAP_WRITE · HEAP_COMMIT</text>
+
+  <text x="757" y="68" text-anchor="middle" font-size="8.5" fill="#7c3aed">consumer_slots[0..7]</text>
+  <text x="757" y="82" text-anchor="middle" font-size="8.5" fill="#7c3aed">schema_fingerprint</text>
+  <text x="757" y="96" text-anchor="middle" font-size="8.5" fill="#7c3aed">binary schema bytes</text>
+
+  <text x="550" y="138" text-anchor="middle" font-size="7.5" fill="#1e293b">
+    ── all control words: Int32Array · Atomics-gated · lock-free · sequentially consistent ──
+  </text>
+
+  <!-- ── INDEX RING ── -->
+  <rect x="248" y="144" width="604" height="122" rx="5"
+        fill="#100900" stroke="#78350f" stroke-width="1"/>
+  <text x="550" y="163" text-anchor="middle" font-size="11" font-weight="700"
+        letter-spacing="0.08em" fill="#fbbf24">INDEX RING  ·  index_capacity × record_stride B</text>
+  <text x="550" y="178" text-anchor="middle" font-size="8" font-style="italic" fill="#78350f">slot = seq &amp; (index_capacity − 1)</text>
+
+  <!-- annotated record slot -->
+  <rect x="262" y="187" width="174" height="42" rx="3" fill="#1c1005" stroke="#92400e" stroke-width="0.75"/>
+  <rect x="262" y="187" width="28" height="42" rx="2" fill="#2d1006"/>
+  <text x="276" y="204" text-anchor="middle" font-size="7" fill="#fbbf24">null</text>
+  <text x="276" y="215" text-anchor="middle" font-size="7" fill="#fbbf24">map</text>
+  <line x1="290" y1="187" x2="290" y2="229" stroke="#78350f" stroke-width="0.5" opacity="0.8"/>
+  <text x="328" y="205" text-anchor="middle" font-size="8" fill="#fbbf24">fixed fields</text>
+  <text x="328" y="218" text-anchor="middle" font-size="7" fill="#a16207">u32·f32·i64·bool8…</text>
+  <line x1="364" y1="187" x2="364" y2="229" stroke="#78350f" stroke-width="0.5" opacity="0.8"/>
+  <text x="404" y="205" text-anchor="middle" font-size="8" fill="#fbbf24">heap ptrs</text>
+  <text x="404" y="218" text-anchor="middle" font-size="7" fill="#a16207">[u32 · u16] × n</text>
+  <text x="349" y="240" text-anchor="middle" font-size="7.5" fill="#78350f">one record slot</text>
+
+  <!-- simplified slots -->
+  <rect x="449" y="187" width="62" height="42" rx="3" fill="#1c1005" stroke="#92400e" stroke-width="0.75"/>
+  <text x="480" y="212" text-anchor="middle" font-size="9" fill="#fbbf24">s = 0</text>
+
+  <rect x="521" y="187" width="62" height="42" rx="3" fill="#1c1005" stroke="#92400e" stroke-width="0.75"/>
+  <text x="552" y="212" text-anchor="middle" font-size="9" fill="#fbbf24">s = 1</text>
+
+  <text x="599" y="213" text-anchor="middle" font-size="14" fill="#92400e">···</text>
+
+  <rect x="619" y="187" width="62" height="42" rx="3" fill="#1c1005" stroke="#92400e" stroke-width="0.75"/>
+  <text x="650" y="212" text-anchor="middle" font-size="9" fill="#fbbf24">s = N−1</text>
+
+  <rect x="691" y="187" width="54" height="42" rx="3" fill="#1c1005" stroke="#b45309" stroke-width="0.75" stroke-dasharray="3,2"/>
+  <text x="718" y="205" text-anchor="middle" font-size="8" fill="#f59e0b">s = 0</text>
+  <text x="718" y="218" text-anchor="middle" font-size="7.5" fill="#b45309">↻ lap</text>
+
+  <!-- ── HEAP RING ── -->
+  <rect x="248" y="278" width="604" height="146" rx="5"
+        fill="#020d09" stroke="#064e3b" stroke-width="1"/>
+  <text x="550" y="297" text-anchor="middle" font-size="11" font-weight="700"
+        letter-spacing="0.08em" fill="#34d399">HEAP RING  ·  heap_capacity B</text>
+
+  <!-- utf8 / json -->
+  <rect x="262" y="308" width="106" height="40" rx="3" fill="#041f13" stroke="#059669" stroke-width="0.75"/>
+  <text x="315" y="325" text-anchor="middle" font-size="9" fill="#34d399">utf8 · json</text>
+  <text x="315" y="339" text-anchor="middle" font-size="7.5" fill="#6ee7b7">string data</text>
+
+  <!-- bytes -->
+  <rect x="378" y="308" width="80" height="40" rx="3" fill="#041f13" stroke="#059669" stroke-width="0.75"/>
+  <text x="418" y="325" text-anchor="middle" font-size="9" fill="#34d399">bytes</text>
+  <text x="418" y="339" text-anchor="middle" font-size="7.5" fill="#6ee7b7">Uint8Array</text>
+
+  <!-- i32_array — with 4B alignment marker -->
+  <polygon points="468,306  473,298  478,306" fill="#f59e0b"/>
+  <text x="499" y="303" text-anchor="middle" font-size="7" fill="#f59e0b">4B align</text>
+  <rect x="468" y="308" width="90" height="40" rx="3" fill="#041f13" stroke="#059669" stroke-width="0.75"/>
+  <text x="513" y="325" text-anchor="middle" font-size="9" fill="#34d399">i32_array</text>
+  <text x="513" y="339" text-anchor="middle" font-size="7.5" fill="#6ee7b7">Int32Array</text>
+
+  <!-- f32_array — with 4B alignment marker -->
+  <polygon points="568,306  573,298  578,306" fill="#f59e0b"/>
+  <rect x="568" y="308" width="90" height="40" rx="3" fill="#041f13" stroke="#059669" stroke-width="0.75"/>
+  <text x="613" y="325" text-anchor="middle" font-size="9" fill="#34d399">f32_array</text>
+  <text x="613" y="339" text-anchor="middle" font-size="7.5" fill="#6ee7b7">Float32Array</text>
+
+  <!-- skip sentinel -->
+  <rect x="668" y="308" width="84" height="40" rx="3" fill="#1a0d00" stroke="#b45309" stroke-width="0.75"/>
+  <text x="710" y="324" text-anchor="middle" font-size="9" font-weight="600" fill="#f59e0b">0xFFFF</text>
+  <text x="710" y="338" text-anchor="middle" font-size="7.5" fill="#d97706">skip sentinel</text>
+
+  <!-- ring-wrap arc -->
+  <path d="M 760 322 C 795 322, 795 344, 760 344"
+        fill="none" stroke="#065f46" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="788" y="337" font-size="7.5" fill="#34d399" text-anchor="middle">↻ wrap</text>
+
+  <text x="550" y="368" text-anchor="middle" font-size="8" font-style="italic" fill="#1e3a2a">
+    4B-aligned — claimHeap pads HEAP_WRITE before i32_array / f32_array writes
+  </text>
+  <text x="550" y="382" text-anchor="middle" font-size="8" font-style="italic" fill="#1e3a2a">
+    contiguous guarantee — no payload spans the ring boundary · skip sentinel on wrap
+  </text>
+  <text x="550" y="398" text-anchor="middle" font-size="8" font-style="italic" fill="#1e3a2a">
+    heap_offset stored as monotonic u32 · physOffset = heapStart + (heap_offset % heap_capacity)
+  </text>
+
+
+  <!-- ════════════════════════════════════════════════════════
+       MAIN THREAD
+       ════════════════════════════════════════════════════════ -->
+  <rect x="902" y="42" width="186" height="386" rx="8"
+        fill="#0e0819" stroke="#6d28d9" stroke-width="1.5"/>
+
+  <polyline points="902,62 902,42 922,42"   fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.6"/>
+  <polyline points="1068,42 1088,42 1088,62" fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.6"/>
+  <polyline points="902,408 902,428 922,428"  fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.6"/>
+  <polyline points="1068,428 1088,428 1088,408" fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.6"/>
+
+  <text x="995" y="33" text-anchor="middle" font-size="9.5" font-weight="700"
+        letter-spacing="0.14em" fill="#334155">MAIN THREAD</text>
+
+  <text x="995" y="68" text-anchor="middle" font-size="13" font-weight="700"
         font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#1d4ed8">begin()</text>
-  <text x="105" y="141" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#1d4ed8">writeRecordBatch()</text>
-  <text x="105" y="161" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#1d4ed8">finalize()</text>
-  <text x="105" y="181" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#1d4ed8">abort()</text>
-  <text x="105" y="201" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#1d4ed8">reset()</text>
+        fill="#a78bfa">StrandView</text>
+  <line x1="916" y1="77" x2="1074" y2="77" stroke="#2e1065" stroke-width="0.75"/>
 
-  <!-- ══════════════════════════════════════════════════════════════════ -->
-  <!-- SharedArrayBuffer                                                  -->
-  <!-- ══════════════════════════════════════════════════════════════════ -->
+  <!-- VIEW section -->
+  <text x="916" y="93" font-size="8" font-weight="700" letter-spacing="0.14em" fill="#334155">VIEW</text>
+  <text x="995" y="109" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">allocateCursor()</text>
+  <text x="995" y="124" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">waitForCommit()</text>
+  <text x="995" y="139" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">acknowledgeRead()</text>
+  <text x="995" y="154" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">registerConsumer()</text>
+  <text x="995" y="169" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">findFirst(field, v)</text>
 
-  <rect x="260" y="22" width="580" height="390" rx="8"
-        fill="#f8fafc" stroke="#475569" stroke-width="1.5"/>
-  <text x="550" y="15" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">SharedArrayBuffer</text>
+  <line x1="916" y1="179" x2="1074" y2="179" stroke="#2e1065" stroke-width="0.75"/>
 
-  <!-- ── HEADER ─────────────────────────────────────────────────────── -->
-  <rect x="278" y="38" width="544" height="128" rx="5"
-        fill="#ede9fe" stroke="#7c3aed" stroke-width="1"/>
-  <text x="550" y="58" text-anchor="middle" font-size="11.5" font-weight="700" fill="#4c1d95">HEADER · 512 B</text>
-  <text x="550" y="76"  text-anchor="middle" font-size="10" fill="#6d28d9">magic · version · schema_fingerprint · CRC</text>
-  <text x="550" y="92"  text-anchor="middle" font-size="10" fill="#6d28d9">record_stride · index_capacity · heap_capacity</text>
-  <text x="550" y="108" text-anchor="middle" font-size="10" fill="#6d28d9">WRITE_SEQ · COMMIT_SEQ · READ_CURSOR · STATUS</text>
-  <text x="550" y="124" text-anchor="middle" font-size="10" fill="#6d28d9">HEAP_WRITE · HEAP_COMMIT · ABORT · schema bytes</text>
+  <!-- CURSOR section -->
+  <text x="916" y="195" font-size="8" font-weight="700" letter-spacing="0.14em" fill="#334155">CURSOR</text>
+  <text x="995" y="211" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#ddd6fe">seek(seq)</text>
+  <text x="995" y="224" text-anchor="middle" font-size="7.5" font-style="italic" fill="#4c1d95">zero heap allocations · string cache</text>
 
-  <!-- ── INDEX RING ──────────────────────────────────────────────────── -->
-  <rect x="278" y="178" width="544" height="100" rx="5"
-        fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
-  <text x="550" y="196" text-anchor="middle" font-size="11.5" font-weight="700" fill="#78350f">INDEX RING · index_capacity × record_stride bytes</text>
-  <text x="550" y="212" text-anchor="middle" font-size="9.5" font-style="italic" fill="#92400e">slot = seq &amp; (index_capacity − 1)</text>
+  <text x="995" y="241" text-anchor="middle" font-size="10"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">getU32 · getI32 · getI64</text>
+  <text x="995" y="255" text-anchor="middle" font-size="10"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">getF32 · getF64 · getBool</text>
+  <text x="995" y="269" text-anchor="middle" font-size="10"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#c4b5fd">getString · getJson · getRef</text>
 
-  <!-- Slot boxes -->
-  <rect x="320" y="221" width="68" height="30" rx="3" fill="#fde68a" stroke="#b45309" stroke-width="0.75"/>
-  <text x="354" y="241" text-anchor="middle" font-size="9.5" fill="#78350f">s = 0</text>
+  <line x1="916" y1="281" x2="1074" y2="281" stroke="#2e1065" stroke-width="0.75"/>
 
-  <rect x="400" y="221" width="68" height="30" rx="3" fill="#fde68a" stroke="#b45309" stroke-width="0.75"/>
-  <text x="434" y="241" text-anchor="middle" font-size="9.5" fill="#78350f">s = 1</text>
+  <!-- TYPED ARRAYS section -->
+  <text x="916" y="297" font-size="8" font-weight="700" letter-spacing="0.14em" fill="#334155">TYPED ARRAYS</text>
+  <text x="995" y="313" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#86efac">getBytes()</text>
+  <text x="995" y="328" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#86efac">getI32Array()</text>
+  <text x="995" y="343" text-anchor="middle" font-size="10.5"
+        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace" fill="#86efac">getF32Array()</text>
+  <text x="995" y="357" text-anchor="middle" font-size="7.5" font-style="italic" fill="#166534">zero-copy SAB views · 4B-aligned</text>
+  <text x="995" y="372" text-anchor="middle" font-size="7.5" font-style="italic" fill="#166534">Uint8Array · Int32Array · Float32Array</text>
 
-  <rect x="480" y="221" width="68" height="30" rx="3" fill="#fde68a" stroke="#b45309" stroke-width="0.75"/>
-  <text x="514" y="241" text-anchor="middle" font-size="9.5" fill="#78350f">s = 2</text>
 
-  <text x="573" y="242" text-anchor="middle" font-size="14" fill="#b45309">···</text>
+  <!-- ════════════════════════════════════════════════════════
+       ARROWS
+       ════════════════════════════════════════════════════════ -->
 
-  <rect x="598" y="221" width="68" height="30" rx="3" fill="#fde68a" stroke="#b45309" stroke-width="0.75"/>
-  <text x="632" y="241" text-anchor="middle" font-size="9.5" fill="#78350f">s = N−1</text>
+  <!-- Write: Worker → SAB, anchored at midpoint of index ring -->
+  <line x1="198" y1="205" x2="230" y2="205"
+        stroke="#38bdf8" stroke-width="2" marker-end="url(#aw)"/>
+  <text x="214" y="197" text-anchor="middle" font-size="7.5" fill="#38bdf8">write</text>
+  <text x="214" y="218" text-anchor="middle" font-size="7" fill="#1e40af">COMMIT_SEQ↑</text>
 
-  <!-- ── HEAP RING ───────────────────────────────────────────────────── -->
-  <rect x="278" y="290" width="544" height="110" rx="5"
-        fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
-  <text x="550" y="309" text-anchor="middle" font-size="11.5" font-weight="700" fill="#14532d">HEAP RING · heap_capacity bytes</text>
+  <!-- Read: SAB → Main -->
+  <line x1="870" y1="205" x2="900" y2="205"
+        stroke="#a78bfa" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="885" y="197" text-anchor="middle" font-size="7.5" fill="#a78bfa">read</text>
+  <text x="885" y="218" text-anchor="middle" font-size="7" fill="#5b21b6">waitAsync</text>
 
-  <!-- Payload segments -->
-  <rect x="295" y="320" width="145" height="38" rx="3" fill="#86efac" stroke="#15803d" stroke-width="0.75"/>
-  <text x="367" y="344" text-anchor="middle" font-size="9.5" fill="#14532d">utf-8 payload</text>
-
-  <rect x="450" y="320" width="145" height="38" rx="3" fill="#86efac" stroke="#15803d" stroke-width="0.75"/>
-  <text x="522" y="344" text-anchor="middle" font-size="9.5" fill="#14532d">utf-8 payload</text>
-
-  <rect x="605" y="320" width="100" height="38" rx="3" fill="#86efac" stroke="#15803d" stroke-width="0.75"/>
-  <text x="655" y="344" text-anchor="middle" font-size="9.5" fill="#14532d">utf-8 payload</text>
-
-  <!-- Skip sentinel -->
-  <rect x="715" y="320" width="90" height="38" rx="3" fill="#fef08a" stroke="#ca8a04" stroke-width="0.75"/>
-  <text x="760" y="336" text-anchor="middle" font-size="9" font-weight="600" fill="#713f12">0xFFFF</text>
-  <text x="760" y="350" text-anchor="middle" font-size="8.5" fill="#92400e">skip · sentinel</text>
-
-  <!-- ══════════════════════════════════════════════════════════════════ -->
-  <!-- Main Thread                                                        -->
-  <!-- ══════════════════════════════════════════════════════════════════ -->
-
-  <rect x="910" y="60" width="170" height="310" rx="8"
-        fill="#fce7f3" stroke="#db2777" stroke-width="1.5"/>
-  <text x="995" y="50" text-anchor="middle" font-size="12" font-weight="600" fill="#831843">Main Thread</text>
-
-  <text x="995" y="91" text-anchor="middle" font-size="12" font-weight="700"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#9d174d">StrandView</text>
-  <line x1="926" y1="103" x2="1064" y2="103" stroke="#f9a8d4" stroke-width="1"/>
-
-  <text x="995" y="121" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#be185d">allocateCursor()</text>
-  <text x="995" y="141" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#be185d">waitForCommit()</text>
-  <text x="995" y="161" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#be185d">acknowledgeRead()</text>
-
-  <line x1="926" y1="174" x2="1064" y2="174" stroke="#f9a8d4" stroke-width="1"/>
-
-  <text x="995" y="193" text-anchor="middle" font-size="12" font-weight="700"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#9d174d">RecordCursor</text>
-  <line x1="926" y1="205" x2="1064" y2="205" stroke="#f9a8d4" stroke-width="1"/>
-
-  <text x="995" y="223" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#be185d">seek(seq)</text>
-  <text x="995" y="237" text-anchor="middle" font-size="9" font-style="italic" fill="#db2777">zero heap allocations</text>
-  <text x="995" y="255" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#be185d">getU32(name)</text>
-  <text x="995" y="273" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#be185d">getString(name)</text>
-  <text x="995" y="291" text-anchor="middle" font-size="11"
-        font-family="'SF Mono','Fira Code','Consolas','Courier New',monospace"
-        fill="#be185d">getRef(name)</text>
-  <text x="995" y="311" text-anchor="middle" font-size="10" fill="#be185d">… getI64  getF32  getBool</text>
-
-  <!-- ══════════════════════════════════════════════════════════════════ -->
-  <!-- Arrows                                                             -->
-  <!-- ══════════════════════════════════════════════════════════════════ -->
-
-  <!-- Write path: Worker → SAB (enters at Index Ring level) -->
-  <line x1="190" y1="228" x2="256" y2="228"
-        stroke="#2563eb" stroke-width="2" marker-end="url(#ah-blue)"/>
-  <text x="223" y="212" text-anchor="middle" font-size="9" fill="#2563eb">Atomics.add(WRITE_SEQ)</text>
-  <text x="223" y="224" text-anchor="middle" font-size="9" fill="#2563eb">Atomics.store(COMMIT_SEQ)</text>
-
-  <!-- Read path: SAB → Main (exits at Index Ring level) -->
-  <line x1="840" y1="228" x2="906" y2="228"
-        stroke="#16a34a" stroke-width="2" marker-end="url(#ah-green)"/>
-  <text x="873" y="212" text-anchor="middle" font-size="9" fill="#16a34a">Atomics.load(COMMIT_SEQ)</text>
-  <text x="873" y="224" text-anchor="middle" font-size="9" fill="#16a34a">Atomics.waitAsync()</text>
-
-  <!-- Backpressure: Main → Worker (via acknowledgeRead) -->
-  <path d="M 995 370 L 995 452 L 105 452 L 105 370"
-        fill="none" stroke="#94a3b8" stroke-width="1.5"
-        stroke-dasharray="5,3" marker-end="url(#ah-gray)"/>
-  <text x="550" y="471" text-anchor="middle" font-size="9" fill="#64748b">
+  <!-- Backpressure arc: Main → Worker via acknowledgeRead -->
+  <path d="M 993 428 L 993 456 L 107 456 L 107 428"
+        fill="none" stroke="#334155" stroke-width="1.25"
+        stroke-dasharray="5,3" marker-end="url(#ab)"/>
+  <text x="550" y="471" text-anchor="middle" font-size="8.5" fill="#475569">
     acknowledgeRead()  →  Atomics.notify(READ_CURSOR)  →  unblocks stalled producer
   </text>
 </svg>

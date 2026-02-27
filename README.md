@@ -27,7 +27,7 @@ A Worker thread writes typed records into a lock-free ring buffer; the main thre
 
 **Backpressure** is automatic: if the consumer falls more than `index_capacity` records behind, `writeRecordBatch()` blocks via `Atomics.wait()` until the consumer calls `acknowledgeRead()`.
 
-**Zero allocation**: `RecordCursor.seek(seq)` mutates two fields on a single pre-allocated object. Calling `getString()` decodes UTF-8 from the SAB once per field per record and caches the result — subsequent calls on the same record are free.
+**Zero allocation**: `RecordCursor.seek(seq)` mutates two fields on a single pre-allocated object. Calling `getString()` decodes UTF-8 from the SAB once per field per record and caches the result — subsequent calls on the same record are free. `getBytes()`, `getI32Array()`, and `getF32Array()` return zero-copy typed-array views directly into the SAB — no deserialization, no copy.
 
 ---
 
@@ -252,13 +252,29 @@ If the producer materializes everything first, backpressure cannot slow the upst
 | `abort()` | Set `STATUS_ERROR`; notify consumer |
 | `reset()` | Rewind all cursors to zero for a fresh stream; does not touch the static header |
 
+#### WASM write interface
+
+For producers that hold a direct SAB reference (WASM linear memory, native extensions), a claim/commit protocol bypasses the JS serialization layer entirely:
+
+| Method | Description |
+|--------|-------------|
+| `claimSlot()` | Block for backpressure, claim one index slot. Returns `{ slotOffset, seq }` — write fields directly at `sab[slotOffset + field.byteOffset]`. |
+| `commitSlot(seq)` | Advance `COMMIT_SEQ`; enforces ordering (throws `RangeError` if out-of-order). |
+| `claimSlots(n)` | Claim `n` slots in one `Atomics.add`. Returns `ReadonlyArray<{ slotOffset, seq }>`. |
+| `commitSlots(fromSeq, n)` | Atomically commit a previously claimed batch. |
+| `claimHeapBytes(byteLen)` | Claim heap space for a variable-length field. Returns `{ physOffset, monoOffset }`. |
+| `commitHeap()` | Advance `CTRL_HEAP_COMMIT` to match `CTRL_HEAP_WRITE`. Call before `commitSlot`. |
+
 ### Consumer — `StrandView`
 
 | Method / property | Description |
 |-------------------|-------------|
 | `allocateCursor()` | Allocate a `RecordCursor` sharing this view's immutable state |
 | `waitForCommit(after, timeoutMs?)` | `Atomics.waitAsync` — resolves when `committedCount > after` |
-| `acknowledgeRead(upTo)` | Advance `READ_CURSOR`; unblocks a stalled producer |
+| `acknowledgeRead(upTo, token?)` | Advance read cursor; unblocks a stalled producer. Pass `token` in multi-consumer mode. |
+| `registerConsumer()` | Claim a per-consumer cursor slot (multi-consumer mode). Returns a token. |
+| `releaseConsumer(token)` | Release a consumer slot; wakes any stalled producer immediately. |
+| `findFirst(field, value)` | Binary-search committed records for the first where `field >= value`. O(log N). Requires `FIELD_FLAG_SORTED_ASC`. |
 | `signalAbort()` | Set `CTRL_ABORT = 1`; wake a stalled producer |
 | `updateInternTable(table)` | Replace the `utf8_ref` intern table; all allocated cursors observe the change immediately |
 | `committedCount` | `Atomics.load(COMMIT_SEQ)` — records safe to read |
@@ -268,7 +284,7 @@ If the producer materializes everything first, backpressure cannot slow the upst
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `seek(seq)` | `boolean` | Position cursor on record `seq`; clears caches; `false` if seq is out of range |
+| `seek(seq)` | `boolean` | Position cursor on record `seq`; clears caches; `false` if out of range |
 | `getU32(name)` | `number \| null` | |
 | `getI32(name)` | `number \| null` | |
 | `getI64(name)` | `bigint \| null` | |
@@ -280,24 +296,32 @@ If the producer materializes everything first, backpressure cannot slow the upst
 | `getString(name)` | `string \| null` | Decode UTF-8 from heap; cached per record |
 | `getJson(name)` | `unknown` | Parse JSON from heap; cached per record |
 | `getRef(name)` | `string \| null` | Resolve interned `utf8_ref` handle |
+| `getBytes(name)` | `Uint8Array \| null` | Zero-copy view into SAB heap for a `bytes` field |
+| `getI32Array(name)` | `Int32Array \| null` | Zero-copy view into SAB heap for an `i32_array` field |
+| `getF32Array(name)` | `Float32Array \| null` | Zero-copy view into SAB heap for an `f32_array` field |
 | `get(name)` | `number \| bigint \| boolean \| string \| unknown` | Generic accessor |
 | `seq` | `number` | Current sequence number; `-1` before first seek |
 
 ### Field types
 
-| Type | Width | Use |
-|------|-------|-----|
-| `u32` | 4 B | Unsigned integers — IDs, counts, positions |
-| `i32` | 4 B | Signed integers — offsets, deltas |
-| `u16` | 2 B | Small unsigned integers — flags, short counts |
-| `u8` | 1 B | Bytes — single-byte enums, small values |
-| `bool8` | 1 B | Boolean flags |
-| `f32` | 4 B | Single-precision floats — scores, probabilities |
-| `f64` | 8 B | Double-precision floats — high-precision values |
-| `i64` | 8 B | Large signed integers — timestamps, large offsets |
-| `utf8` | 6 B | Variable-length strings — heap pointer + length |
-| `utf8_ref` | 4 B | Interned low-cardinality strings (<1 000 distinct values) |
-| `json` | 6 B | Sparse per-record metadata — heap pointer + length, lazily parsed |
+| Type | Index width | Accessor | Use |
+|------|-------------|----------|-----|
+| `u32` | 4 B | `getU32` | Unsigned integers — IDs, counts, positions |
+| `i32` | 4 B | `getI32` | Signed integers — offsets, deltas |
+| `u16` | 2 B | `getU16` | Small unsigned integers — flags, short counts |
+| `u8` | 1 B | `getU8` | Single-byte enums, small values |
+| `bool8` | 1 B | `getBool` | Boolean flags |
+| `f32` | 4 B | `getF32` | Single-precision floats — scores, probabilities |
+| `f64` | 8 B | `getF64` | Double-precision floats — high-precision values |
+| `i64` | 8 B | `getI64` | Large signed integers — timestamps, large offsets |
+| `utf8` | 6 B | `getString` | Variable-length strings — heap-backed, decoded on read, cached per record |
+| `utf8_ref` | 4 B | `getRef` | Interned low-cardinality strings (<1 000 distinct values) |
+| `json` | 6 B | `getJson` | Sparse per-record metadata — heap-backed, lazily parsed, cached per record |
+| `bytes` | 6 B | `getBytes` | Raw byte arrays — zero-copy `Uint8Array` view into SAB (e.g. base qualities) |
+| `i32_array` | 6 B | `getI32Array` | Integer arrays — zero-copy `Int32Array` view, 4-byte heap-aligned (e.g. depths, GT fields) |
+| `f32_array` | 6 B | `getF32Array` | Float arrays — zero-copy `Float32Array` view, 4-byte heap-aligned (e.g. coverage, AF vectors) |
+
+All heap-backed types (`utf8`, `json`, `bytes`, `i32_array`, `f32_array`) store a 6-byte pointer in the index record: `[heap_offset: u32][heap_len: u16]`. The writer guarantees every payload is physically contiguous in the heap ring — no payload spans the ring boundary.
 
 ---
 
