@@ -126,7 +126,8 @@ export function decodeSchema(bytes: Uint8Array): BinarySchemaDescriptor | null {
     if (type === undefined) return null; // unknown type tag — corrupt or newer version
     if (cursor + 5 + nameLen > bytes.length) return null;
 
-    const name      = decoder.decode(bytes.subarray(cursor + 5, cursor + 5 + nameLen));
+    // .slice() copies out of SharedArrayBuffer — TextDecoder rejects SAB-backed views
+    const name      = decoder.decode(bytes.slice(cursor + 5, cursor + 5 + nameLen));
     const rawLen    = 5 + nameLen;
     const paddedLen = Math.ceil(rawLen / 4) * 4;
 

@@ -274,8 +274,8 @@ export class RecordCursor {
       );
     }
 
-    // Zero-copy until this point: bytes lives in the SAB, not a copy.
-    const bytes = new Uint8Array(this._sab, physOffset, heapLen);
+    // Copy out of SAB — TextDecoder rejects SharedArrayBuffer-backed views.
+    const bytes = new Uint8Array(this._sab, physOffset, heapLen).slice();
     const decoded = utf8Decoder.decode(bytes);
     this._stringCache.set(name, decoded);
     return decoded;
@@ -319,7 +319,7 @@ export class RecordCursor {
       );
     }
 
-    const bytes   = new Uint8Array(this._sab, physOffset, heapLen);
+    const bytes   = new Uint8Array(this._sab, physOffset, heapLen).slice();
     const text    = utf8Decoder.decode(bytes);
     const parsed: unknown = JSON.parse(text);
     this._jsonCache.set(name, parsed);
