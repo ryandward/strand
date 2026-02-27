@@ -119,7 +119,7 @@ export class StrandAbortError extends Error {
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
-export type WritableValue = number | bigint | boolean | string | object | null | undefined;
+export type WritableValue = number | bigint | boolean | string | Uint8Array | Int32Array | Float32Array | object | null | undefined;
 
 /**
  * A record to be written. Keys are schema field names; values must be
@@ -507,7 +507,8 @@ export class StrandWriter {
   ): Array<Map<string, Uint8Array>> {
     const result: Array<Map<string, Uint8Array>> = [];
     const varLenFields = this.map.schema.fields.filter(
-      f => f.type === 'utf8' || f.type === 'json',
+      f => f.type === 'utf8' || f.type === 'json' ||
+           f.type === 'bytes' || f.type === 'i32_array' || f.type === 'f32_array',
     );
 
     for (let i = 0; i < records.length; i++) {
@@ -517,6 +518,52 @@ export class StrandWriter {
 
       for (const field of varLenFields) {
         const rawValue = record[field.name];
+
+        // ── Typed-array heap types ─────────────────────────────────────────
+        if (field.type === 'bytes' || field.type === 'i32_array' || field.type === 'f32_array') {
+          if (rawValue == null) {
+            encoded.set(field.name, new Uint8Array(0));
+            continue;
+          }
+
+          let bytes: Uint8Array;
+          if (rawValue instanceof Uint8Array) {
+            bytes = rawValue;
+          } else if (rawValue instanceof Int32Array) {
+            bytes = new Uint8Array(rawValue.buffer, rawValue.byteOffset, rawValue.byteLength);
+          } else if (rawValue instanceof Float32Array) {
+            bytes = new Uint8Array(rawValue.buffer, rawValue.byteOffset, rawValue.byteLength);
+          } else if (Array.isArray(rawValue)) {
+            // Plain number[] — convert to the appropriate typed array first.
+            if (field.type === 'bytes') {
+              bytes = new Uint8Array(rawValue as number[]);
+            } else if (field.type === 'i32_array') {
+              const ta = new Int32Array(rawValue as number[]);
+              bytes = new Uint8Array(ta.buffer);
+            } else {
+              const ta = new Float32Array(rawValue as number[]);
+              bytes = new Uint8Array(ta.buffer);
+            }
+          } else {
+            throw new TypeError(
+              `Field '${field.name}' (${field.type}) expects a typed array or number[]; ` +
+              `got ${typeof rawValue}.`,
+            );
+          }
+
+          if (bytes.length > 0xffff) {
+            throw new StrandCapacityError(
+              `Field '${field.name}' is ${bytes.length} bytes. ` +
+              `Maximum is 65535 (heap_len is stored as u16).`,
+            );
+          }
+
+          encoded.set(field.name, bytes);
+          totalHeapBytes += bytes.length;
+          continue;
+        }
+
+        // ── utf8 / json ────────────────────────────────────────────────────
 
         // For json fields, serialize the value to a JSON string first.
         // JSON.stringify(undefined | function | symbol) returns undefined —
@@ -556,7 +603,7 @@ export class StrandWriter {
       // even starting at the ring origin there isn't enough contiguous space.
       if (totalHeapBytes > this.map.heap_capacity) {
         throw new StrandCapacityError(
-          `Record ${i} requires ${totalHeapBytes} total heap bytes across its utf8/json ` +
+          `Record ${i} requires ${totalHeapBytes} total heap bytes across its variable-length ` +
           `fields, which exceeds heap_capacity (${this.map.heap_capacity} bytes). ` +
           `Increase heap_capacity in computeStrandMap(), ` +
           `or split the record into smaller chunks.`,
@@ -744,6 +791,26 @@ export class StrandWriter {
           this.data.setUint16(offset + 4, encoded.length, true);
           break;
         }
+
+        case 'bytes':
+        case 'i32_array':
+        case 'f32_array': {
+          // Wire format identical to utf8: [heap_offset: u32][heap_len: u16].
+          // heap_len stores BYTE length (not element count).
+          // bytes is 1-byte aligned; i32_array and f32_array require 4-byte alignment.
+          const encoded   = heapFields.get(field.name) ?? new Uint8Array(0);
+          const alignment = field.type === 'bytes' ? 1 : 4;
+          const { heapOffset, physOffset } = this.claimHeap(encoded.length, alignment);
+
+          if (encoded.length > 0) {
+            new Uint8Array(this.sab, this.heapStartByte + physOffset, encoded.length)
+              .set(encoded);
+          }
+
+          this.data.setUint32(offset,     heapOffset,     true);
+          this.data.setUint16(offset + 4, encoded.length, true);
+          break;
+        }
       }
     }
   }
@@ -772,7 +839,10 @@ export class StrandWriter {
    *   edge case that only occurs when the ring boundary falls within 5 bytes
    *   of the current write cursor.
    */
-  private claimHeap(byteLen: number): { heapOffset: number; physOffset: number } {
+  private claimHeap(
+    byteLen:   number,
+    alignment: number = 1,
+  ): { heapOffset: number; physOffset: number } {
     // Load current monotonic cursor. For single-producer this Atomics.load
     // is equivalent to a plain read, but the Atomics API is used throughout
     // for correctness and to prevent compiler re-ordering.
@@ -782,32 +852,77 @@ export class StrandWriter {
     // The >>> 0 coercion reinterprets the bit pattern as an unsigned 32-bit
     // integer, giving the correct monotonic position. The consumer reads the
     // heap_offset field via getUint32 (unsigned), so both sides are consistent.
-    const heapWrite       = Atomics.load(this.ctrl, CTRL_HEAP_WRITE) >>> 0;
-    const physCursor      = heapWrite % this.map.heap_capacity;
-    const bytesBeforeWrap = this.map.heap_capacity - physCursor;
+    let heapWrite  = Atomics.load(this.ctrl, CTRL_HEAP_WRITE) >>> 0;
+    let physCursor = heapWrite % this.map.heap_capacity;
 
     if (byteLen === 0) {
-      // Empty string: no heap bytes needed. Store the current cursor as the
+      // Empty: no heap bytes needed. Store the current cursor as the
       // offset (heap_len = 0 means the consumer reads zero bytes from here).
       return { heapOffset: heapWrite, physOffset: physCursor };
     }
 
+    // ── Alignment padding ─────────────────────────────────────────────────
+    //
+    // Float32Array and Int32Array require their SAB byte offset to be a
+    // multiple of their element size (4 bytes). physCursor + heapStartByte
+    // is always 4-byte aligned when physCursor = 0 (heapStart is divisible
+    // by 4: HEADER_SIZE=512 + index_capacity × record_stride, both multiples
+    // of 4). We must ensure physCursor itself is a multiple of alignment.
+    //
+    // utf8, json, and bytes pass alignment = 1, so this block is a no-op.
+
+    if (alignment > 1) {
+      const misalign = physCursor % alignment;
+
+      if (misalign !== 0) {
+        const pad             = alignment - misalign;
+        const bytesBeforeWrap = this.map.heap_capacity - physCursor;
+
+        if (pad <= bytesBeforeWrap) {
+          // Padding fits entirely before the ring boundary.
+          // Advance the cursor by pad bytes; no data is written here.
+          Atomics.add(this.ctrl, CTRL_HEAP_WRITE, pad);
+          heapWrite  += pad;
+          physCursor += pad;
+        } else {
+          // The aligned position is past the ring boundary. Wrap now.
+          // physOffset = 0 is always aligned for any power-of-2 alignment.
+          if (bytesBeforeWrap >= HEAP_SKIP_SIZE) {
+            const sentinelView = new DataView(
+              this.sab,
+              this.heapStartByte + physCursor,
+              HEAP_SKIP_SIZE,
+            );
+            sentinelView.setUint16(0, HEAP_SKIP_MAGIC,                     true);
+            sentinelView.setUint32(2, bytesBeforeWrap - HEAP_SKIP_SIZE,    true);
+          }
+          Atomics.add(this.ctrl, CTRL_HEAP_WRITE, bytesBeforeWrap);
+          heapWrite  += bytesBeforeWrap;
+          physCursor  = 0;
+        }
+      }
+    }
+
+    // ── Data bytes ────────────────────────────────────────────────────────
+
+    const bytesBeforeWrap = this.map.heap_capacity - physCursor;
+
     if (byteLen <= bytesBeforeWrap) {
-      // ── Happy path: string fits before the ring boundary ─────────────────
+      // ── Happy path: data fits before the ring boundary ───────────────────
       Atomics.add(this.ctrl, CTRL_HEAP_WRITE, byteLen);
       return { heapOffset: heapWrite, physOffset: physCursor };
     }
 
-    // ── Wrap path: string does not fit before the ring boundary ──────────
+    // ── Wrap path: data does not fit before the ring boundary ─────────────
     //
-    // We cannot split the string across the ring boundary — the consumer
-    // requires a contiguous subarray. Instead:
+    // We cannot split a typed-array across the ring boundary — the consumer
+    // requires a contiguous subarray for a zero-copy typed-array view.
+    // Instead:
     //   1. Write a skip sentinel at the current position (if space allows).
-    //   2. Skip HEAP_WRITE forward to the ring origin.
-    //   3. The string is written at physOffset = 0.
+    //   2. Skip HEAP_WRITE forward to the ring origin (physOffset = 0).
+    //   3. The data is written at physOffset = 0 (always aligned).
 
     if (bytesBeforeWrap >= HEAP_SKIP_SIZE) {
-      // Enough room for the sentinel. Write it.
       const sentinelView = new DataView(
         this.sab,
         this.heapStartByte + physCursor,
@@ -819,7 +934,7 @@ export class StrandWriter {
     // If bytesBeforeWrap < HEAP_SKIP_SIZE, we silently lose those bytes.
     // A diagnostic scanner sees trailing zeros at the ring boundary.
 
-    // The string's monotonic heap_offset is the position AFTER the pre-wrap
+    // The data's monotonic heap_offset is the position AFTER the pre-wrap
     // padding. Its physical address is heapStart + (wrappedOffset % heapCapacity) = 0.
     const wrappedOffset = heapWrite + bytesBeforeWrap;
     Atomics.add(this.ctrl, CTRL_HEAP_WRITE, bytesBeforeWrap + byteLen);

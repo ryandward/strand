@@ -327,6 +327,68 @@ export class RecordCursor {
   }
 
   /**
+   * Return a zero-copy Uint8Array view into the SAB heap for a bytes field.
+   *
+   * The view is valid as long as the producer has not lapped the heap ring
+   * and overwritten this region. Copy the data if you need it to outlive
+   * the current record window.
+   *
+   * Returns null for an empty or missing field.
+   */
+  getBytes(name: string): Uint8Array | null {
+    const f = this._fieldIndex.get(name);
+    if (!f || f.type !== 'bytes') return null;
+    if (this._isNull(f)) return null;
+
+    const heapOffset = this._data.getUint32(this._recordOffset + f.byteOffset,     true);
+    const heapLen    = this._data.getUint16(this._recordOffset + f.byteOffset + 4, true);
+    if (heapLen === 0) return null;
+
+    const physOffset = this._heapStartByte + (heapOffset % this._heapCapacity);
+    return new Uint8Array(this._sab, physOffset, heapLen);
+  }
+
+  /**
+   * Return a zero-copy Int32Array view into the SAB heap for an i32_array field.
+   *
+   * The writer guarantees the heap offset is 4-byte aligned (via claimHeap
+   * alignment padding), so the Int32Array constructor never throws. Returns
+   * null for an empty or missing field.
+   */
+  getI32Array(name: string): Int32Array | null {
+    const f = this._fieldIndex.get(name);
+    if (!f || f.type !== 'i32_array') return null;
+    if (this._isNull(f)) return null;
+
+    const heapOffset = this._data.getUint32(this._recordOffset + f.byteOffset,     true);
+    const heapLen    = this._data.getUint16(this._recordOffset + f.byteOffset + 4, true);
+    if (heapLen === 0) return null;
+
+    const physOffset = this._heapStartByte + (heapOffset % this._heapCapacity);
+    return new Int32Array(this._sab, physOffset, heapLen / 4);
+  }
+
+  /**
+   * Return a zero-copy Float32Array view into the SAB heap for an f32_array field.
+   *
+   * The writer guarantees the heap offset is 4-byte aligned (via claimHeap
+   * alignment padding), so the Float32Array constructor never throws. Returns
+   * null for an empty or missing field.
+   */
+  getF32Array(name: string): Float32Array | null {
+    const f = this._fieldIndex.get(name);
+    if (!f || f.type !== 'f32_array') return null;
+    if (this._isNull(f)) return null;
+
+    const heapOffset = this._data.getUint32(this._recordOffset + f.byteOffset,     true);
+    const heapLen    = this._data.getUint16(this._recordOffset + f.byteOffset + 4, true);
+    if (heapLen === 0) return null;
+
+    const physOffset = this._heapStartByte + (heapOffset % this._heapCapacity);
+    return new Float32Array(this._sab, physOffset, heapLen / 4);
+  }
+
+  /**
    * Resolve a utf8_ref field to its interned string.
    *
    * utf8_ref fields store a u32 handle. The intern table is a string array
@@ -370,9 +432,12 @@ export class RecordCursor {
       case 'u16':      return this.getU16(name);
       case 'u8':       return this.getU8(name);
       case 'bool8':    return this.getBool(name);
-      case 'utf8':     return this.getString(name);
-      case 'utf8_ref': return this.getRef(name);
-      case 'json':     return this.getJson(name);
+      case 'utf8':      return this.getString(name);
+      case 'utf8_ref':  return this.getRef(name);
+      case 'json':      return this.getJson(name);
+      case 'bytes':     return this.getBytes(name);
+      case 'i32_array': return this.getI32Array(name);
+      case 'f32_array': return this.getF32Array(name);
     }
   }
 }

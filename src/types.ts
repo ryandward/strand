@@ -48,21 +48,27 @@ export type FieldType =
   | 'bool8'
   | 'utf8'
   | 'utf8_ref'
-  | 'json';
+  | 'json'
+  | 'bytes'
+  | 'i32_array'
+  | 'f32_array';
 
 /** Byte width of each FieldType inside the fixed-width index record. */
 export const FIELD_BYTE_WIDTHS: Readonly<Record<FieldType, number>> = {
-  i32:      4,
-  u32:      4,
-  i64:      8,
-  f32:      4,
-  f64:      8,
-  u16:      2,
-  u8:       1,
-  bool8:    1,
-  utf8:     6, // [heap_offset: u32][heap_len: u16]
-  utf8_ref: 4, // [intern_handle: u32]
-  json:     6, // [heap_offset: u32][heap_len: u16] — same wire format as utf8
+  i32:       4,
+  u32:       4,
+  i64:       8,
+  f32:       4,
+  f64:       8,
+  u16:       2,
+  u8:        1,
+  bool8:     1,
+  utf8:      6, // [heap_offset: u32][heap_len: u16]
+  utf8_ref:  4, // [intern_handle: u32]
+  json:      6, // [heap_offset: u32][heap_len: u16] — same wire format as utf8
+  bytes:     6, // [heap_offset: u32][heap_len: u16] — raw Uint8Array, 1-byte aligned
+  i32_array: 6, // [heap_offset: u32][heap_len: u16] — Int32Array,   4-byte aligned
+  f32_array: 6, // [heap_offset: u32][heap_len: u16] — Float32Array, 4-byte aligned
 };
 
 // ─── Field Flags ──────────────────────────────────────────────────────────────

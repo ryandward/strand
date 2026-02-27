@@ -31,11 +31,13 @@ import {
 const TYPE_TO_TAG: Readonly<Record<FieldType, number>> = {
   i32: 0, u32: 1, i64: 2, f32: 3, f64: 4,
   u16: 5, u8:  6, bool8: 7, utf8: 8, utf8_ref: 9, json: 10,
+  bytes: 11, i32_array: 12, f32_array: 13,
 };
 
 const TAG_TO_TYPE: Readonly<Record<number, FieldType>> = {
   0: 'i32', 1: 'u32', 2: 'i64', 3: 'f32', 4: 'f64',
   5: 'u16', 6: 'u8',  7: 'bool8', 8: 'utf8', 9: 'utf8_ref', 10: 'json',
+  11: 'bytes', 12: 'i32_array', 13: 'f32_array',
 };
 
 // ─── FNV-1a 32-bit ────────────────────────────────────────────────────────────
