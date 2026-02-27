@@ -6,16 +6,22 @@
  * validates the fingerprint on attach — type mismatch fails fast before
  * any data access is attempted.
  *
- * Wire format for the binary schema descriptor (all values little-endian):
+ * Wire format for the binary schema descriptor (v5, all values little-endian):
  *
  *   [field_count: u16]
- *   For each field (variable length, padded to 4-byte boundary):
+ *   For each field (4 bytes, fixed width — no padding needed):
  *     [type_tag:    u8]
  *     [flags:       u8]
- *     [byte_offset: u16]  ← explicit; no alignment guessing on decode
- *     [name_len:    u8]
- *     [name_bytes:  name_len × u8, UTF-8]
- *     [padding:     0–3 zero bytes to next 4-byte boundary]
+ *     [byte_offset: u16, LE]  ← explicit; no alignment guessing on decode
+ *
+ * Field names are NOT stored in binary schema bytes. They are carried in the
+ * header metadata region as a `columns` string array (auto-injected by
+ * initStrandHeader). This removes the per-field name-length cost and the
+ * 4-byte padding, shrinking schema bytes from ~40 bytes/field to 4 bytes/field.
+ *
+ * The fingerprint validates structural compatibility (type, flags, byte_offset
+ * sequence) — not naming — which is the correct invariant for ring-buffer
+ * interoperability between producers and consumers.
  */
 
 import {
@@ -59,40 +65,24 @@ function fnv1a32(bytes: Uint8Array): number {
 // ─── Encoding ─────────────────────────────────────────────────────────────────
 
 /**
- * Encode a BinarySchemaDescriptor to bytes for storage in the header.
- * This encoding is the canonical input to schemaFingerprint().
+ * Encode a BinarySchemaDescriptor to compact bytes for storage in the header.
+ *
+ * v5 format: 2 + 4 × fieldCount bytes (fixed width per field, no names).
+ * This is the canonical input to schemaFingerprint().
  */
 export function encodeSchema(schema: BinarySchemaDescriptor): Uint8Array {
-  const encoder     = new TextEncoder();
-  const fieldBufs:  Uint8Array[] = [];
-  let   totalLen    = 2; // field_count u16
+  const fieldCount = schema.fields.length;
+  const out = new Uint8Array(2 + fieldCount * 4);
+  const dv  = new DataView(out.buffer);
 
-  for (const field of schema.fields) {
-    const nameBytes = encoder.encode(field.name);
-    // header: type(1) + flags(1) + byteOffset(2) + nameLen(1) + name(nameLen)
-    const rawLen    = 5 + nameBytes.length;
-    const paddedLen = Math.ceil(rawLen / 4) * 4;
-    const buf       = new Uint8Array(paddedLen); // zero-filled
-    const dv        = new DataView(buf.buffer);
+  dv.setUint16(0, fieldCount, /* littleEndian */ true);
 
-    buf[0] = TYPE_TO_TAG[field.type]!;
-    buf[1] = field.flags;
-    dv.setUint16(2, field.byteOffset, /* littleEndian */ true);
-    buf[4] = nameBytes.length;
-    buf.set(nameBytes, 5);
-    // Trailing bytes remain zero-padding.
-
-    fieldBufs.push(buf);
-    totalLen += paddedLen;
-  }
-
-  const out = new Uint8Array(totalLen);
-  new DataView(out.buffer).setUint16(0, schema.fields.length, true);
-
-  let cursor = 2;
-  for (const fb of fieldBufs) {
-    out.set(fb, cursor);
-    cursor += fb.length;
+  for (let i = 0; i < fieldCount; i++) {
+    const f   = schema.fields[i]!;
+    const off = 2 + i * 4;
+    out[off]     = TYPE_TO_TAG[f.type]!;
+    out[off + 1] = f.flags;
+    dv.setUint16(off + 2, f.byteOffset, /* littleEndian */ true);
   }
 
   return out;
@@ -101,43 +91,44 @@ export function encodeSchema(schema: BinarySchemaDescriptor): Uint8Array {
 // ─── Decoding ─────────────────────────────────────────────────────────────────
 
 /**
- * Decode a binary schema descriptor read from the header.
+ * Decode a v5 binary schema descriptor read from the header.
+ *
+ * @param bytes  Raw schema bytes from the header (4 bytes/field after the u16 count).
+ * @param names  Optional column names from the header metadata `columns` array.
+ *               When provided, length must match field_count; fields are named
+ *               in declaration order. When absent, fields are named `f0`, `f1`, …
+ *
  * Returns null if the bytes are truncated or contain an unknown type tag.
  */
-export function decodeSchema(bytes: Uint8Array): BinarySchemaDescriptor | null {
+export function decodeSchema(
+  bytes: Uint8Array,
+  names?: readonly string[],
+): BinarySchemaDescriptor | null {
   if (bytes.length < 2) return null;
 
-  const decoder    = new TextDecoder();
   const dv         = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const fieldCount = dv.getUint16(0, true);
-  const fields:    FieldDescriptor[] = [];
-  let   cursor     = 2;
+
+  if (bytes.length < 2 + fieldCount * 4) return null; // truncated
+
+  const fields: FieldDescriptor[] = [];
   let   nullableBitIdx = 0;
 
   for (let i = 0; i < fieldCount; i++) {
-    if (cursor + 5 > bytes.length) return null; // truncated
-
-    const typeTag    = bytes[cursor]!;
-    const flags      = bytes[cursor + 1]!;
-    const byteOffset = dv.getUint16(cursor + 2, true);
-    const nameLen    = bytes[cursor + 4]!;
+    const off        = 2 + i * 4;
+    const typeTag    = bytes[off]!;
+    const flags      = bytes[off + 1]!;
+    const byteOffset = dv.getUint16(off + 2, true);
     const type       = TAG_TO_TYPE[typeTag];
 
     if (type === undefined) return null; // unknown type tag — corrupt or newer version
-    if (cursor + 5 + nameLen > bytes.length) return null;
 
-    // .slice() copies into a plain ArrayBuffer. .subarray() would return
-    // another SAB-backed view, which TextDecoder.decode() rejects in browsers
-    // (spec forbids decoding shared views; Node.js allows it, masking the bug).
-    const name      = decoder.decode(bytes.slice(cursor + 5, cursor + 5 + nameLen));
-    const rawLen    = 5 + nameLen;
-    const paddedLen = Math.ceil(rawLen / 4) * 4;
+    const name = (names !== undefined && i < names.length) ? names[i]! : `f${i}`;
 
     const fd: FieldDescriptor = (flags & FIELD_FLAG_NULLABLE)
       ? { name, type, byteOffset, flags, nullableBitIndex: nullableBitIdx++ }
       : { name, type, byteOffset, flags };
     fields.push(fd);
-    cursor += paddedLen;
   }
 
   // Recompute record_stride from field layout — the highest (byteOffset + width) + alignment.
@@ -154,8 +145,10 @@ export function decodeSchema(bytes: Uint8Array): BinarySchemaDescriptor | null {
 
 /**
  * Compute the FNV-1a 32-bit fingerprint of a BinarySchemaDescriptor.
- * Two schemas with identical field names, types, offsets, and flags
- * produce the same fingerprint. Any difference produces a different one.
+ *
+ * The fingerprint covers field type, flags, and byte_offset — not names.
+ * Two schemas with identical structural layout (types, offsets, flags)
+ * produce the same fingerprint regardless of field naming.
  */
 export function schemaFingerprint(schema: BinarySchemaDescriptor): number {
   return fnv1a32(encodeSchema(schema));

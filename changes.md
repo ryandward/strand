@@ -1,5 +1,65 @@
 # Changes
 
+## Feat: v5 header — compact schema encoding + full column names in metadata
+
+**Version:** v5 (STRAND_VERSION 4 → 5)
+
+Field names are no longer stored inside binary schema bytes. The binary schema
+encoding is now 4 bytes/field (type u8, flags u8, byte_offset u16), fixed width,
+no padding. HEADER_SIZE is expanded from 512 to 4096 bytes.
+
+### Why this matters
+
+Fields with real genomic names — `Deduped_Bowtie_analytical_result`,
+`Chromosome_Position_hg38` — blew past the old 420-byte schema budget. Users
+were forced to use opaque ordinal aliases like `f01`, `f02`. No more.
+
+The header fingerprint now validates structural compatibility (types, flags,
+byte offsets) rather than naming — the correct invariant for binary interchange.
+Names are irrelevant to the ring-buffer hot path.
+
+### Wire format changes
+
+**Binary schema** (compact, v5):
+```
+[field_count: u16]
+For each field (4 bytes, fixed):
+  [type_tag: u8][flags: u8][byte_offset: u16, LE]
+```
+
+**HEADER_SIZE:** 512 → 4096 bytes. The expanded tail gives ~3,900 bytes for
+the metadata region after a typical schema (24 fields ≈ 98 bytes).
+
+**Column names in metadata:** `initStrandHeader` always auto-injects a
+`columns: string[]` key into the metadata JSON. `readStrandHeader` extracts it
+to reconstruct named `FieldDescriptor`s, then strips it from `StrandMap.meta`
+so producers' custom metadata is not polluted with this internal transport key.
+
+### API changes
+
+```typescript
+// Producer: unchanged call signature, but non-object meta is now silently
+// ignored (columns are always auto-injected regardless).
+initStrandHeader(sab, map);                      // meta = { columns: [...] }
+initStrandHeader(sab, map, { internTable: [...] }); // meta = { columns: [...], internTable: [...] }
+
+// Consumer: StrandMap.meta is the caller-supplied object minus 'columns'.
+const view = new StrandView(sab);
+view.map.meta;          // { internTable: [...] } — columns is stripped
+view.map.schema.fields; // full named FieldDescriptors, names from header meta
+```
+
+### Encoding size comparison
+
+| | Old (v4 + names) | New (v5 compact) |
+|---|---|---|
+| 5-field schema | ~52 bytes | 22 bytes |
+| 24 fields, 20-char avg names | ~960 bytes → **exceeds limit** | 98 bytes ✓ |
+| Schema head budget | 420 bytes | 4004 bytes |
+| Metadata tail budget | ~360 bytes | ~3,900 bytes |
+
+---
+
 ## Feat: v4 header — producer metadata region
 
 **Version:** v4 (STRAND_VERSION 3 → 4)

@@ -31,12 +31,14 @@
  *   ── Schema + metadata section (DataView reads) ──────────────────────────
  *   [88..91]  schema_byte_len  u32
  *   [92..92+schema_byte_len-1]
- *             binary schema descriptor (up to 420 bytes)
+ *             binary schema descriptor (v5: 4 bytes/field, no names)
+ *             field encoding: [type_tag: u8][flags: u8][byte_offset: u16]
  *   [92+schema_byte_len..92+schema_byte_len+3]
- *             meta_byte_len    u32  = 0 if no metadata  ← v4 addition
- *   [92+schema_byte_len+4..511]
- *             meta_bytes       UTF-8 JSON (meta_byte_len bytes)  ← v4 addition
- *             Constraint: 92 + schema_byte_len + 4 + meta_byte_len ≤ 512
+ *             meta_byte_len    u32  = 0 if no metadata
+ *   [92+schema_byte_len+4..4095]
+ *             meta_bytes       UTF-8 JSON (meta_byte_len bytes)
+ *             Always contains at least: { "columns": ["field1", "field2", ...] }
+ *             Constraint: 92 + schema_byte_len + 4 + meta_byte_len ≤ 4096
  */
 
 // ─── Magic & Version ──────────────────────────────────────────────────────────
@@ -54,12 +56,19 @@ export const STRAND_MAGIC:   number = 0x5354524e;
  *           bytes: [meta_byte_len: u32][meta_bytes: UTF-8 JSON].
  *           Enables non-JS producers to pass intern tables and query context
  *           through the header without a side-channel JSON payload.
+ * v4 → v5: field names removed from binary schema encoding — schema bytes are
+ *           now 4 bytes/field (type u8, flags u8, byte_offset u16), no name
+ *           storage, no per-field padding. HEADER_SIZE expanded from 512 to
+ *           4096 so the metadata region can carry real column names (e.g.
+ *           "Deduped_Bowtie_analytical_result") for any realistic schema.
+ *           initStrandHeader() auto-injects a `columns` string array into meta;
+ *           readStrandHeader() extracts it to reconstruct named FieldDescriptors.
  */
-export const STRAND_VERSION: number = 4;
+export const STRAND_VERSION: number = 5;
 
 // ─── Header Layout ────────────────────────────────────────────────────────────
 
-export const HEADER_SIZE = 512; // bytes
+export const HEADER_SIZE = 4096; // bytes
 
 /**
  * Byte offsets for static header fields. Read via DataView only.
@@ -85,8 +94,8 @@ export const OFFSET_HEADER_CRC      = 24; // u32
 export const OFFSET_SCHEMA_BYTE_LEN = 88; // u32 — was 56 in v2; shifted 32 bytes for consumer slots
 export const OFFSET_SCHEMA_BYTES    = 92; // variable, up to MAX_SCHEMA_BYTES
 
-/** Maximum schema descriptor bytes that fit inside the 512-byte header. */
-export const MAX_SCHEMA_BYTES = HEADER_SIZE - OFFSET_SCHEMA_BYTES; // 420
+/** Maximum schema descriptor bytes that fit inside the 4096-byte header. */
+export const MAX_SCHEMA_BYTES = HEADER_SIZE - OFFSET_SCHEMA_BYTES; // 4004
 
 // ─── Atomics Control Word Indices ─────────────────────────────────────────────
 

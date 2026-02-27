@@ -1,12 +1,16 @@
 /**
- * @strand/core — v4 Producer Metadata Region
+ * @strand/core — v5 Producer Metadata Region
  *
- * Tests for the optional metadata stored in the unused header tail:
- *   [92 + schema_byte_len .. 511]  →  [meta_byte_len: u32][meta_bytes: UTF-8 JSON]
+ * Tests for the optional metadata stored in the header tail:
+ *   [92 + schema_byte_len .. 4095]  →  [meta_byte_len: u32][meta_bytes: UTF-8 JSON]
  *
- * A non-JS producer (Rust, WASM) can pass intern tables, query context, or
- * any structured data through the header without a side-channel JSON payload.
- * StrandView.meta exposes the parsed value on the consumer side.
+ * In v5, field names are stripped from binary schema bytes and carried as a
+ * `columns` string array auto-injected into metadata by initStrandHeader().
+ * readStrandHeader() extracts `columns` to reconstruct named FieldDescriptors,
+ * then strips `columns` from the user-visible StrandMap.meta.
+ *
+ * A non-JS producer (Rust, WASM) can additionally embed intern tables, query
+ * context, or any plain-object metadata — merged alongside `columns`.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -21,7 +25,7 @@ import {
 
 // Minimal schema used across all tests.
 const schema = buildSchema([
-  { name: 'id',   type: 'u32' },
+  { name: 'id',    type: 'u32' },
   { name: 'score', type: 'f32' },
 ]);
 
@@ -37,9 +41,9 @@ function makeMap() {
 
 // ─── Group 1: basic round-trip ───────────────────────────────────────────────
 
-describe('producer metadata (v4) — basic round-trip', () => {
+describe('producer metadata (v5) — basic round-trip', () => {
 
-  it('readStrandHeader returns meta when initStrandHeader is given meta', () => {
+  it('readStrandHeader returns meta when initStrandHeader is given a meta object', () => {
     const map  = makeMap();
     const sab  = new SharedArrayBuffer(map.total_bytes);
     const meta = { internTable: ['chr1', 'chr2', 'chrM'], query: { start: 0, end: 500_000 } };
@@ -47,6 +51,7 @@ describe('producer metadata (v4) — basic round-trip', () => {
     initStrandHeader(sab, map, meta);
     const out = readStrandHeader(sab);
 
+    // columns is stripped from user-visible meta; user-supplied keys remain.
     expect(out.meta).toEqual(meta);
   });
 
@@ -61,7 +66,8 @@ describe('producer metadata (v4) — basic round-trip', () => {
     expect(view.map.meta).toEqual(meta);
   });
 
-  it('meta is absent when not supplied', () => {
+  it('meta is absent when no caller meta is supplied (columns injected and stripped)', () => {
+    // columns is auto-injected into the header but stripped from StrandMap.meta.
     const map = makeMap();
     const sab = new SharedArrayBuffer(map.total_bytes);
 
@@ -71,7 +77,7 @@ describe('producer metadata (v4) — basic round-trip', () => {
     expect(out.meta).toBeUndefined();
   });
 
-  it('meta is absent on a view constructed without meta', () => {
+  it('meta is absent on a StrandView constructed without caller meta', () => {
     const map  = makeMap();
     const sab  = new SharedArrayBuffer(map.total_bytes);
     initStrandHeader(sab, map);
@@ -79,82 +85,125 @@ describe('producer metadata (v4) — basic round-trip', () => {
     expect(view.map.meta).toBeUndefined();
   });
 
+  it('schema fields have real names after round-trip (columns reconstructs names)', () => {
+    const map = makeMap();
+    const sab = new SharedArrayBuffer(map.total_bytes);
+    initStrandHeader(sab, map);
+    const out = readStrandHeader(sab);
+
+    expect(out.schema.fields.map(f => f.name)).toEqual(['id', 'score']);
+  });
+
 });
 
-// ─── Group 2: value types ─────────────────────────────────────────────────────
+// ─── Group 2: object meta merges with columns ─────────────────────────────────
 
-describe('producer metadata (v4) — value types', () => {
+describe('producer metadata (v5) — object meta merging', () => {
 
-  function roundTrip(meta: unknown): unknown {
+  it('object meta with nested structure round-trips (columns stripped from meta)', () => {
+    const meta = {
+      query:       { assembly: 'hg38', chrom: 'chr17', start: 7_674_220, end: 7_674_893 },
+      internTable: ['PASS', 'LowQual', 'SnpCluster'],
+      version:     1,
+    };
     const map = makeMap();
     const sab = new SharedArrayBuffer(map.total_bytes);
     initStrandHeader(sab, map, meta);
-    return readStrandHeader(sab).meta;
-  }
+    const out = readStrandHeader(sab);
 
-  it('string meta', () => {
-    expect(roundTrip('hello strand')).toBe('hello strand');
+    expect(out.meta).toEqual(meta);
+    // columns should not appear in user-visible meta.
+    expect((out.meta as Record<string, unknown>)['columns']).toBeUndefined();
   });
 
-  it('number meta', () => {
-    expect(roundTrip(42)).toBe(42);
-  });
+  it('columns always appear in schema.fields even when meta object is provided', () => {
+    const meta = { internTable: ['chr1', 'chr2'] };
+    const map = makeMap();
+    const sab = new SharedArrayBuffer(map.total_bytes);
+    initStrandHeader(sab, map, meta);
+    const out = readStrandHeader(sab);
 
-  it('null meta produces absent meta (meta_byte_len = 0)', () => {
-    // JSON.stringify(null) = "null" — a 4-byte payload; round-trips correctly.
-    expect(roundTrip(null)).toBeNull();
-  });
-
-  it('array meta', () => {
-    const table = ['chr1', 'chr2', 'chr3', 'chrX', 'chrY', 'chrM'];
-    expect(roundTrip(table)).toEqual(table);
-  });
-
-  it('object meta with nested structure', () => {
-    const meta = {
-      query:      { assembly: 'hg38', chrom: 'chr17', start: 7_674_220, end: 7_674_893 },
-      internTable: ['PASS', 'LowQual', 'SnpCluster'],
-      version:    1,
-    };
-    expect(roundTrip(meta)).toEqual(meta);
+    expect(out.schema.fields.map(f => f.name)).toEqual(['id', 'score']);
   });
 
 });
 
-// ─── Group 3: boundary conditions ────────────────────────────────────────────
+// ─── Group 3: non-object meta is ignored ──────────────────────────────────────
 
-describe('producer metadata (v4) — boundary conditions', () => {
+describe('producer metadata (v5) — non-object meta ignored', () => {
 
-  it('meta that exactly fills available header space is accepted', () => {
-    const map        = makeMap();
-    const sab        = new SharedArrayBuffer(map.total_bytes);
-    const schemaBytes = 2 + schema.fields.reduce((acc, f) => {
-      const nameLen = new TextEncoder().encode(f.name).length;
-      return acc + Math.ceil((5 + nameLen) / 4) * 4;
-    }, 0);
-    // Available: 512 − (92 + schemaBytes) − 4 (meta_byte_len) bytes for JSON text.
-    const available  = 512 - 92 - schemaBytes - 4;
-    // A JSON string of exactly `available` bytes: "\"" + "x".repeat(available-2) + "\""
-    const payload    = 'x'.repeat(available - 2); // -2 for surrounding quotes in JSON
-    const meta       = payload;                    // JSON.stringify("xxx...") = "\"xxx...\""
+  // Non-object meta values cannot be merged with the auto-injected columns object.
+  // Only columns are written; StrandMap.meta is absent after stripping columns.
 
-    expect(() => initStrandHeader(sab, map, meta)).not.toThrow();
-    expect(readStrandHeader(sab).meta).toBe(payload);
+  it('string meta is ignored; schema field names still round-trip', () => {
+    const map = makeMap();
+    const sab = new SharedArrayBuffer(map.total_bytes);
+    initStrandHeader(sab, map, 'hello strand');
+    const out = readStrandHeader(sab);
+
+    expect(out.meta).toBeUndefined();
+    expect(out.schema.fields.map(f => f.name)).toEqual(['id', 'score']);
   });
 
-  it('meta that overflows header throws StrandHeaderError', () => {
-    const map  = makeMap();
-    const sab  = new SharedArrayBuffer(map.total_bytes);
-    // Build a string whose JSON encoding exceeds available space.
-    const big  = 'z'.repeat(600); // WAY more than 420 bytes of available tail
-    expect(() => initStrandHeader(sab, map, big)).toThrow(StrandHeaderError);
+  it('number meta is ignored', () => {
+    const map = makeMap();
+    const sab = new SharedArrayBuffer(map.total_bytes);
+    initStrandHeader(sab, map, 42);
+    const out = readStrandHeader(sab);
+
+    expect(out.meta).toBeUndefined();
   });
 
-  it('undefined meta is treated as absent', () => {
+  it('null meta is ignored', () => {
+    const map = makeMap();
+    const sab = new SharedArrayBuffer(map.total_bytes);
+    initStrandHeader(sab, map, null);
+    const out = readStrandHeader(sab);
+
+    expect(out.meta).toBeUndefined();
+  });
+
+  it('array meta is ignored', () => {
+    const map = makeMap();
+    const sab = new SharedArrayBuffer(map.total_bytes);
+    initStrandHeader(sab, map, ['chr1', 'chr2', 'chr3']);
+    const out = readStrandHeader(sab);
+
+    expect(out.meta).toBeUndefined();
+  });
+
+  it('undefined meta produces absent StrandMap.meta', () => {
     const map = makeMap();
     const sab = new SharedArrayBuffer(map.total_bytes);
     initStrandHeader(sab, map, undefined);
     expect(readStrandHeader(sab).meta).toBeUndefined();
+  });
+
+});
+
+// ─── Group 4: boundary conditions ────────────────────────────────────────────
+
+describe('producer metadata (v5) — boundary conditions', () => {
+
+  it('large object meta that fits in the 4096-byte header is accepted', () => {
+    // With HEADER_SIZE=4096, the metadata region is very generous.
+    // A ~3000-byte JSON payload should fit comfortably.
+    const map  = makeMap();
+    const sab  = new SharedArrayBuffer(map.total_bytes);
+    const meta = { data: 'x'.repeat(2000), table: ['a', 'b', 'c'] };
+
+    expect(() => initStrandHeader(sab, map, meta)).not.toThrow();
+    const out = readStrandHeader(sab);
+    expect(out.meta).toEqual(meta);
+  });
+
+  it('meta that overflows the 4096-byte header throws StrandHeaderError', () => {
+    const map = makeMap();
+    const sab = new SharedArrayBuffer(map.total_bytes);
+    // 5000 chars of data JSON-encodes to ~5013 bytes; plus columns overhead
+    // and schema bytes exceeds the ~3900 bytes available in the tail.
+    const big = { data: 'z'.repeat(5000) };
+    expect(() => initStrandHeader(sab, map, big)).toThrow(StrandHeaderError);
   });
 
 });

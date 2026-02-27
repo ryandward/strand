@@ -1,4 +1,4 @@
-# Strand Wire Protocol — Version 4
+# Strand Wire Protocol — Version 5
 
 **Scope:** Everything a non-TypeScript producer (Rust, WASM, C, Python) needs to write
 correct Strand records into a `SharedArrayBuffer` without reading the TypeScript source.
@@ -16,7 +16,7 @@ only the producer-observable binary contract.
 3. [Header — static section](#3-header--static-section)
 4. [Header — Atomics control words](#4-header--atomics-control-words)
 5. [Header — schema section](#5-header--schema-section)
-6. [Header — producer metadata (v4)](#6-header--producer-metadata-v4)
+6. [Header — producer metadata (v5)](#6-header--producer-metadata-v5)
 7. [Schema binary encoding](#7-schema-binary-encoding)
 8. [FNV-1a 32-bit hash](#8-fnv-1a-32-bit-hash)
 9. [Field type tags and wire widths](#9-field-type-tags-and-wire-widths)
@@ -46,7 +46,7 @@ producer and consumer always share the same process (or a `SharedArrayBuffer` on
 same host), their native byte order is identical. On little-endian hosts (all modern
 x86/ARM64) this is consistent with the rest of the format.
 
-Big-endian platforms are not supported. `@strand/core v3` refuses to initialize a
+Big-endian platforms are not supported. `@strand/core v5` refuses to initialize a
 header on a big-endian system.
 
 ---
@@ -57,19 +57,19 @@ A Strand `SharedArrayBuffer` is divided into three contiguous regions:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  HEADER          512 bytes            byte offset 0                 │
+│  HEADER          4096 bytes           byte offset 0                 │
 ├─────────────────────────────────────────────────────────────────────┤
 │  INDEX REGION    index_capacity × record_stride bytes               │
-│                  byte offset 512                                     │
+│                  byte offset 4096                                    │
 ├─────────────────────────────────────────────────────────────────────┤
 │  HEAP REGION     heap_capacity bytes                                 │
-│                  byte offset 512 + index_capacity × record_stride   │
+│                  byte offset 4096 + index_capacity × record_stride  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ```
-total_bytes = 512 + (index_capacity × record_stride) + heap_capacity
-heap_start  = 512 + (index_capacity × record_stride)
+total_bytes = 4096 + (index_capacity × record_stride) + heap_capacity
+heap_start  = 4096 + (index_capacity × record_stride)
 ```
 
 `index_capacity` must be a power of 2. `record_stride` must be divisible by 4.
@@ -84,7 +84,7 @@ and never modified. All values are little-endian `u32`.
 | Byte offset | Size | Name             | Value / notes                                            |
 |-------------|------|------------------|----------------------------------------------------------|
 | 0           | u32  | `magic`          | `0x5354524E` — bytes `'N'`, `'R'`, `'T'`, `'S'` in LE  |
-| 4           | u32  | `version`        | `3` for this document                                    |
+| 4           | u32  | `version`        | `5` for this document                                    |
 | 8           | u32  | `schema_fp`      | FNV-1a 32-bit of the binary schema encoding (§7, §8)    |
 | 12          | u32  | `record_stride`  | Byte length of one index record slot, 4-byte aligned     |
 | 16          | u32  | `index_capacity` | Ring capacity in records; must be a power of 2           |
@@ -146,23 +146,24 @@ for backpressure when any slot is occupied.
 
 ## 5. Header — schema section
 
-Bytes 88–511 hold the binary-encoded schema descriptor.
+Bytes 88–4095 hold the compact binary-encoded schema descriptor followed by
+the metadata region.
 
-| Byte offset | Size | Name              | Notes                                          |
-|-------------|------|-------------------|------------------------------------------------|
-| 88          | u32  | `schema_byte_len` | Length in bytes of the schema encoding below  |
-| 92          | …    | schema bytes      | `schema_byte_len` bytes; up to 420 bytes total |
-| 92 + len    | …    | (unused)          | Zeroed by `initStrandHeader()`                 |
+| Byte offset | Size | Name              | Notes                                                   |
+|-------------|------|-------------------|---------------------------------------------------------|
+| 88          | u32  | `schema_byte_len` | Length in bytes of the schema encoding below            |
+| 92          | …    | schema bytes      | `schema_byte_len` bytes; 4 bytes/field (v5, no names)  |
+| 92 + len    | …    | metadata region   | See §6 (always present in v5; contains at least `columns`) |
 
 The binary schema encoding is described in §7. The FNV-1a hash of these bytes
 (not including `schema_byte_len`) is `schema_fp` (stored at byte 8).
 
 ---
 
-## 6. Header — producer metadata (v4)
+## 6. Header — producer metadata (v5)
 
-Immediately after the schema bytes in the unused header tail there is an optional
-producer metadata region. It is absent if `meta_byte_len == 0`.
+Immediately after the schema bytes the header always contains a metadata region.
+In v5 this region is never empty — it always holds at least the `columns` array.
 
 ```
 byte offset                      field
@@ -172,27 +173,31 @@ byte offset                      field
 92 + schema_byte_len + 4 + len   (unused, zeroed by SharedArrayBuffer allocation)
 ```
 
-Constraint: `92 + schema_byte_len + 4 + meta_byte_len ≤ 512`.
+Constraint: `92 + schema_byte_len + 4 + meta_byte_len ≤ 4096`.
 
-A producer that has no metadata to pass must still write `meta_byte_len = 0` at
-`92 + schema_byte_len`. This lets `readStrandHeader()` distinguish "no metadata"
-from "metadata region not written at all". (SharedArrayBuffer bytes are zeroed on
-allocation, so a reader on a freshly initialized SAB will see 0 even without an
-explicit write — but explicit zeroing is safer for re-used memory.)
+**Reserved key — `columns`:** `initStrandHeader()` always injects
+`"columns": ["fieldName0", "fieldName1", …]` into the metadata JSON (in schema
+declaration order). `readStrandHeader()` extracts this key to reconstruct named
+`FieldDescriptor`s, then strips it from `StrandMap.meta`. A non-TypeScript
+producer writing its own header **must** include `columns` so the consumer
+can resolve field names for `cursor.getString("fieldName")` etc.
 
-**Typical use:** A Rust/WASM producer places the intern table for `utf8_ref` fields
-here so the TypeScript consumer does not need a separate JSON side-channel:
+Additional producer data can be placed in the same object alongside `columns`:
 
 ```json
 {
+  "columns": ["chrom", "pos", "qual", "filter"],
   "internTable": ["chr1", "chr2", "chr3", "chrX", "chrY", "chrM"],
   "query": { "assembly": "hg38", "chrom": "chr1", "start": 0, "end": 248956422 }
 }
 ```
 
-`readStrandHeader()` (and `new StrandView()`) parse this payload with `JSON.parse`
-and expose it as `StrandMap.meta`. A corrupt but non-empty metadata payload is
-silently ignored (`meta` is absent); the rest of the header is unaffected.
+`readStrandHeader()` parses this payload with `JSON.parse`, extracts `columns`
+for schema reconstruction, and exposes the remainder as `StrandMap.meta`
+(`{ "internTable": […], "query": {…} }` in the example above).
+
+A corrupt metadata payload is silently ignored; schema is still decoded with
+placeholder names (`f0`, `f1`, …) instead of real names.
 
 ---
 
@@ -204,16 +209,19 @@ All values little-endian. This is the canonical input for FNV-1a fingerprinting.
 [field_count: u16]
 
 For each field (in schema declaration order):
-  [type_tag:    u8]           — see §9
-  [flags:       u8]           — see §10
-  [byte_offset: u16]          — field's start byte within the fixed-width record slot
-  [name_len:    u8]           — UTF-8 byte length of the field name
-  [name_bytes:  name_len × u8]
-  [padding:     0–3 zero bytes] — pad total field encoding to next 4-byte boundary
+  [type_tag:    u8]    — see §9
+  [flags:       u8]    — see §10
+  [byte_offset: u16]   — field's start byte within the fixed-width record slot
 
-  Raw field encoding size = 5 + name_len
-  Padded size             = ceil((5 + name_len) / 4) × 4
+  Each field is exactly 4 bytes. No names. No padding.
+  Total schema bytes = 2 + (4 × field_count)
 ```
+
+Field names are **not** stored in the schema binary encoding. They are carried
+separately in the metadata region (§6) as `columns: string[]`. The fingerprint
+(`schema_fp`) therefore validates structural compatibility — type sequence, flags,
+byte offsets — not naming. Two schemas with identical layout but different column
+names produce the same fingerprint.
 
 `byte_offset` is stored explicitly in the schema encoding. A reader never has to
 recompute field alignment rules — `byte_offset` gives the exact position within
@@ -666,10 +674,10 @@ using any geometry values. Validation order:
 
 ```
 STRAND_MAGIC    = 0x5354524E   ('STRN' in little-endian ASCII)
-STRAND_VERSION  = 4
-HEADER_SIZE     = 512
-INDEX_START     = 512
-MAX_SCHEMA_BYTES = 420         (512 − 92)
+STRAND_VERSION  = 5
+HEADER_SIZE     = 4096
+INDEX_START     = 4096
+MAX_SCHEMA_BYTES = 4004        (4096 − 92)
 HEAP_SKIP_MAGIC = 0xFFFF
 HEAP_SKIP_SIZE  = 6
 CONSUMER_SLOT_VACANT = 0x7FFFFFFF

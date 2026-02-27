@@ -1,13 +1,16 @@
 /**
  * @strand/core — header initialization and validation
  *
- * The Strand header occupies the first 512 bytes of every SharedArrayBuffer
+ * The Strand header occupies the first 4096 bytes of every SharedArrayBuffer
  * managed by this library. It contains:
  *
  *   Static geometry  — magic, version, schema fingerprint, ring capacities,
  *                      and a CRC of those six fields (header_crc)
  *   Atomics words    — seven i32 cursors (including CTRL_ABORT)
- *   Schema bytes     — binary-encoded BinarySchemaDescriptor
+ *   Schema bytes     — compact binary-encoded BinarySchemaDescriptor (v5:
+ *                      4 bytes/field, no names — type_tag + flags + byte_offset)
+ *   Metadata region  — UTF-8 JSON; always contains at least
+ *                      { columns: string[] } (auto-injected from schema)
  *
  * initStrandHeader()  — called once by the party that allocates the SAB.
  *                       Safe to call before sharing the SAB with any Worker.
@@ -95,8 +98,8 @@ function isPowerOfTwo(n: number): boolean {
  *   - sab.byteLength >= map.total_bytes
  *   - map.index_capacity is a power of 2
  *   - map.record_stride is 4-byte aligned
- *   - Binary schema fits in the header region (up to 420 bytes)
- *   - If `meta` is supplied: schema + metadata must fit in the 420-byte tail
+ *   - Binary schema fits in the header region
+ *   - schema + metadata (including auto-injected columns) must fit in header
  *   - map.schema_fingerprint matches the actual fingerprint of map.schema
  *
  * Writes static fields, computes and stores header_crc, then initializes
@@ -104,11 +107,17 @@ function isPowerOfTwo(n: number): boolean {
  * semantics). Any Worker that receives this SAB via postMessage after
  * initStrandHeader returns will see the correctly initialized header.
  *
- * @param meta  Optional producer metadata. Any JSON-serializable value.
- *              Stored as UTF-8 JSON immediately after the schema bytes in
- *              the unused header tail. Retrieved by readStrandHeader() as
- *              StrandMap.meta. Use for intern tables, query context, or any
- *              producer-side information a non-JS producer needs to pass.
+ * Field names are NOT stored in the binary schema bytes (v5). Instead,
+ * a `columns` string array is always auto-injected into the metadata region.
+ * If `meta` is a plain object, it is merged: `{ columns: [...], ...meta }`.
+ * Non-object meta values (strings, numbers, arrays) are silently ignored —
+ * only `{ columns: [...] }` is stored.
+ *
+ * @param meta  Optional producer metadata. Must be a plain JSON-serializable
+ *              object. Use for intern tables, query context, or any
+ *              producer-side information. Retrieved by readStrandHeader() as
+ *              StrandMap.meta (with `columns` stripped — it is consumed
+ *              internally to reconstruct named FieldDescriptors).
  *
  * Call this exactly once, before sharing the SAB with any Worker.
  */
@@ -181,24 +190,31 @@ export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap, meta?: 
     throw new StrandHeaderError(
       `Schema binary encoding is ${schemaBytes.length} bytes; ` +
       `maximum that fits in the header is ${MAX_SCHEMA_BYTES} bytes. ` +
-      `Reduce field count or shorten field names.`,
+      `Reduce field count.`,
     );
   }
 
+  // Build effective metadata: always inject `columns` from schema field names.
+  // Merge with caller meta if it is a plain object; ignore non-object meta.
+  const columns = map.schema.fields.map(f => f.name);
+  let effectiveMeta: Record<string, unknown> = { columns };
+  if (
+    meta !== undefined && meta !== null &&
+    typeof meta === 'object' && !Array.isArray(meta)
+  ) {
+    effectiveMeta = { columns, ...(meta as Record<string, unknown>) };
+  }
+
   const metaEncoder = new TextEncoder();
-  const metaBytes   = meta !== undefined ? metaEncoder.encode(JSON.stringify(meta)) : null;
-  if (metaBytes !== null) {
-    // After the schema: 4 bytes for meta_byte_len + metaBytes.length for payload.
-    const metaRegionSize = 4 + metaBytes.length;
-    const schemaEnd      = OFFSET_SCHEMA_BYTES + schemaBytes.length;
-    if (schemaEnd + metaRegionSize > HEADER_SIZE) {
-      throw new StrandHeaderError(
-        `Producer metadata (${metaBytes.length} bytes JSON) does not fit in the ` +
-        `header tail after schema (${schemaBytes.length} bytes): ` +
-        `need ${schemaEnd + metaRegionSize} bytes, header is ${HEADER_SIZE}. ` +
-        `Shorten field names or reduce metadata size.`,
-      );
-    }
+  const metaBytes   = metaEncoder.encode(JSON.stringify(effectiveMeta));
+  const schemaEnd   = OFFSET_SCHEMA_BYTES + schemaBytes.length;
+  if (schemaEnd + 4 + metaBytes.length > HEADER_SIZE) {
+    throw new StrandHeaderError(
+      `Producer metadata (${metaBytes.length} bytes JSON) does not fit in the ` +
+      `header tail after schema (${schemaBytes.length} bytes): ` +
+      `need ${schemaEnd + 4 + metaBytes.length} bytes, header is ${HEADER_SIZE}. ` +
+      `Reduce metadata size.`,
+    );
   }
 
   // Reject a StrandMap whose fingerprint disagrees with its schema.
@@ -238,22 +254,18 @@ export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap, meta?: 
   view.setUint32(OFFSET_SCHEMA_BYTE_LEN, schemaBytes.length, true);
   new Uint8Array(sab, OFFSET_SCHEMA_BYTES, schemaBytes.length).set(schemaBytes);
 
-  // ── Write producer metadata (v4) ───────────────────────────────────────────
+  // ── Write producer metadata (v5) ───────────────────────────────────────────
   //
-  // Packed immediately after the schema bytes in the unused header tail:
+  // Packed immediately after the schema bytes in the header tail:
   //   [meta_byte_len: u32, LE][meta_bytes: UTF-8 JSON]
   //
-  // If no metadata, write meta_byte_len = 0. This sentinel lets readStrandHeader
-  // distinguish "no metadata" from "metadata region not yet written" for partial
-  // writes. Bytes beyond meta_byte_len were zeroed when the SAB was allocated.
+  // Always written: meta always contains at least { columns: [...] } so
+  // readStrandHeader can reconstruct named FieldDescriptors without names
+  // being stored in the compact binary schema bytes.
 
   const metaOffset = OFFSET_SCHEMA_BYTES + schemaBytes.length;
-  if (metaBytes !== null && metaBytes.length > 0) {
-    view.setUint32(metaOffset, metaBytes.length, true);
-    new Uint8Array(sab, metaOffset + 4, metaBytes.length).set(metaBytes);
-  } else {
-    view.setUint32(metaOffset, 0, true);
-  }
+  view.setUint32(metaOffset, metaBytes.length, true);
+  new Uint8Array(sab, metaOffset + 4, metaBytes.length).set(metaBytes);
 
   // ── Initialize Atomics control words ──────────────────────────────────────
   //
@@ -367,10 +379,44 @@ export function readStrandHeader(sab: SharedArrayBuffer): StrandMap {
     );
   }
 
+  // ── Producer metadata (v5) ────────────────────────────────────────────────
+  //
+  // Immediately after the schema bytes: [meta_byte_len: u32, LE][meta_bytes].
+  // Read meta BEFORE decoding schema so column names are available to pass
+  // to decodeSchema() for named FieldDescriptor reconstruction.
+  // meta_byte_len = 0 means no metadata was written (should not happen in v5).
+
+  let parsedMeta: Record<string, unknown> | null = null;
+  let columns: string[] | undefined;
+
+  const metaLenOffset = OFFSET_SCHEMA_BYTES + schema_byte_len;
+  if (metaLenOffset + 4 <= HEADER_SIZE) {
+    const meta_byte_len = view.getUint32(metaLenOffset, true);
+    if (meta_byte_len > 0 && metaLenOffset + 4 + meta_byte_len <= HEADER_SIZE) {
+      const metaBytes = new Uint8Array(sab, metaLenOffset + 4, meta_byte_len).slice();
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(metaBytes));
+        if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          parsedMeta = parsed as Record<string, unknown>;
+          // Extract columns for schema reconstruction.
+          const cols = parsedMeta['columns'];
+          if (Array.isArray(cols) && cols.every(c => typeof c === 'string')) {
+            columns = cols as string[];
+          }
+        }
+      } catch {
+        // Corrupt metadata — schema will decode with placeholder names.
+      }
+    }
+  }
+
   // ── Schema ─────────────────────────────────────────────────────────────────
+  //
+  // Pass column names so FieldDescriptors are reconstructed with real names.
+  // If metadata was corrupt or absent, falls back to placeholder names (f0, f1…).
 
   const schemaSlice = new Uint8Array(sab, OFFSET_SCHEMA_BYTES, schema_byte_len);
-  const schema      = decodeSchema(schemaSlice);
+  const schema      = decodeSchema(schemaSlice, columns);
   if (schema === null) {
     throw new StrandHeaderError(
       `Failed to decode schema descriptor (${schema_byte_len} bytes). ` +
@@ -402,16 +448,6 @@ export function readStrandHeader(sab: SharedArrayBuffer): StrandMap {
   // decodeSchema() recomputes record_stride from field layout (high-water mark
   // of byteOffset + field_width, padded to 4 bytes). The geometry section
   // stores the stride independently. They must agree.
-  //
-  // A mismatch means either:
-  //   a) A hand-crafted BinarySchemaDescriptor set record_stride < field layout
-  //      (stride overflow — fields alias adjacent slots), or
-  //   b) The geometry section was corrupted after initStrandHeader ran (caught
-  //      by the CRC above for most cases, but the schema bytes are not CRC'd).
-  //
-  // If the decoded stride is larger, a writer using the geometry stride would
-  // write slots too close together and a reader at byteOffset would alias into
-  // the next slot — silent memory corruption.
 
   if (schema.record_stride !== record_stride) {
     throw new StrandHeaderError(
@@ -421,29 +457,19 @@ export function readStrandHeader(sab: SharedArrayBuffer): StrandMap {
     );
   }
 
-  // ── Producer metadata (v4) ────────────────────────────────────────────────
+  // ── Reconstruct StrandMap ──────────────────────────────────────────────────
   //
-  // Immediately after the schema bytes: [meta_byte_len: u32, LE][meta_bytes].
-  // meta_byte_len = 0 means no metadata was written.
-  // Silently ignored if the schema_byte_len leaves no room for the u32
-  // (should not happen with valid headers, but be defensive).
+  // Strip `columns` from user-visible meta — it is an internal transport key
+  // for schema reconstruction, not producer-supplied data. If the remaining
+  // object is empty, meta is absent.
 
   let meta: unknown;
-  const metaLenOffset = OFFSET_SCHEMA_BYTES + schema_byte_len;
-  if (metaLenOffset + 4 <= HEADER_SIZE) {
-    const meta_byte_len = view.getUint32(metaLenOffset, true);
-    if (meta_byte_len > 0 && metaLenOffset + 4 + meta_byte_len <= HEADER_SIZE) {
-      const metaBytes = new Uint8Array(sab, metaLenOffset + 4, meta_byte_len).slice();
-      try {
-        meta = JSON.parse(new TextDecoder().decode(metaBytes));
-      } catch {
-        // Corrupt metadata — do not throw; consumers that need meta can check it.
-        meta = undefined;
-      }
+  if (parsedMeta !== null) {
+    const { columns: _cols, ...rest } = parsedMeta;
+    if (Object.keys(rest).length > 0) {
+      meta = rest;
     }
   }
-
-  // ── Reconstruct StrandMap ──────────────────────────────────────────────────
 
   const strandMap: StrandMap = {
     schema_fingerprint,

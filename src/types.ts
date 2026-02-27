@@ -157,15 +157,17 @@ export interface StrandMap {
   readonly schema: BinarySchemaDescriptor;
 
   /**
-   * Optional producer metadata stored in the header's unused tail region.
+   * Optional producer metadata stored in the header tail region (v5+).
    *
-   * Non-JS producers (Rust, WASM) can pass intern tables, query context, or
-   * any other structured data here without a side-channel JSON payload.
-   * Stored as UTF-8 JSON in bytes [92+schema_byte_len+4 .. 511] of the header.
+   * `initStrandHeader()` always writes a `columns: string[]` key to carry
+   * field names through the header (binary schema bytes no longer contain
+   * names in v5). If the caller also passes a plain `meta` object, it is
+   * merged: `{ columns: [...], ...meta }`. The `columns` key is consumed
+   * internally by `readStrandHeader()` to reconstruct named FieldDescriptors
+   * and is then stripped — only caller-supplied keys appear here.
    *
-   * `readStrandHeader()` parses this field if present. `initStrandHeader()`
-   * writes it if a second `meta` argument is supplied. Absent on v3 and older
-   * headers, or when the producer does not supply metadata.
+   * Absent when the producer did not supply metadata beyond the auto-injected
+   * columns, or when metadata was corrupt or unreadable.
    */
   readonly meta?: unknown;
 }
