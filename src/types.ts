@@ -81,10 +81,17 @@ export const FIELD_FLAG_SORTED_DESC = 0b100;
  * the binary header so the decoder never has to re-derive alignment rules.
  */
 export interface FieldDescriptor {
-  readonly name:       string;
-  readonly type:       FieldType;
-  readonly byteOffset: number;
-  readonly flags:      number;
+  readonly name:             string;
+  readonly type:             FieldType;
+  readonly byteOffset:       number;
+  readonly flags:            number;
+  /**
+   * Ordinal position among nullable fields in schema declaration order.
+   * Bit `nullableBitIndex % 8` of bitmap byte `Math.floor(nullableBitIndex / 8)`
+   * in each record slot is 1 when this field was written, 0 when it was omitted.
+   * Only present on fields with FIELD_FLAG_NULLABLE; undefined otherwise.
+   */
+  readonly nullableBitIndex?: number;
 }
 
 /**

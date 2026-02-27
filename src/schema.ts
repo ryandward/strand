@@ -20,6 +20,7 @@
 
 import {
   FIELD_BYTE_WIDTHS,
+  FIELD_FLAG_NULLABLE,
   type FieldDescriptor,
   type BinarySchemaDescriptor,
   type FieldType,
@@ -109,6 +110,7 @@ export function decodeSchema(bytes: Uint8Array): BinarySchemaDescriptor | null {
   const fieldCount = dv.getUint16(0, true);
   const fields:    FieldDescriptor[] = [];
   let   cursor     = 2;
+  let   nullableBitIdx = 0;
 
   for (let i = 0; i < fieldCount; i++) {
     if (cursor + 5 > bytes.length) return null; // truncated
@@ -126,7 +128,10 @@ export function decodeSchema(bytes: Uint8Array): BinarySchemaDescriptor | null {
     const rawLen    = 5 + nameLen;
     const paddedLen = Math.ceil(rawLen / 4) * 4;
 
-    fields.push({ name, type, byteOffset, flags });
+    const fd: FieldDescriptor = (flags & FIELD_FLAG_NULLABLE)
+      ? { name, type, byteOffset, flags, nullableBitIndex: nullableBitIdx++ }
+      : { name, type, byteOffset, flags };
+    fields.push(fd);
     cursor += paddedLen;
   }
 
@@ -178,8 +183,16 @@ export function buildSchema(
   }
 
   const seen = new Set<string>();
-  let offset = 0;
   const resolved: FieldDescriptor[] = [];
+
+  // Reserve null validity bitmap bytes at the very start of each record slot.
+  // One bit per nullable field (FIELD_FLAG_NULLABLE). Bitmap size is
+  // Math.ceil(nullableCount / 8) bytes; zero if no nullable fields exist.
+  const nullableCount = fields.filter(f => f.flags && (f.flags & FIELD_FLAG_NULLABLE)).length;
+  const bitmapBytes   = nullableCount > 0 ? Math.ceil(nullableCount / 8) : 0;
+
+  let offset         = bitmapBytes; // fields start after the bitmap
+  let nullableBitIdx = 0;
 
   for (const f of fields) {
     if (seen.has(f.name)) {
@@ -193,11 +206,15 @@ export function buildSchema(
     const width     = FIELD_BYTE_WIDTHS[f.type];
     const alignment = Math.min(width, 4);
 
-    // Align field to its natural boundary.
+    // Align field to its natural boundary (within the slot, after bitmap bytes).
     const rem = offset % alignment;
     if (rem !== 0) offset += alignment - rem;
 
-    resolved.push({ name: f.name, type: f.type, byteOffset: offset, flags: f.flags ?? 0 });
+    const flags = f.flags ?? 0;
+    const fd: FieldDescriptor = (flags & FIELD_FLAG_NULLABLE)
+      ? { name: f.name, type: f.type, byteOffset: offset, flags, nullableBitIndex: nullableBitIdx++ }
+      : { name: f.name, type: f.type, byteOffset: offset, flags };
+    resolved.push(fd);
     offset += width;
   }
 

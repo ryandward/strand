@@ -39,6 +39,9 @@ import {
   CTRL_HEAP_WRITE,
   CTRL_HEAP_COMMIT,
   CTRL_ABORT,
+  CTRL_CONSUMER_BASE,
+  MAX_CONSUMERS,
+  CONSUMER_SLOT_VACANT,
   STATUS_INITIALIZING,
   computeTotalBytes,
 } from './constants';
@@ -227,6 +230,12 @@ export function initStrandHeader(sab: SharedArrayBuffer, map: StrandMap): void {
   Atomics.store(ctrl, CTRL_HEAP_WRITE,  0);
   Atomics.store(ctrl, CTRL_HEAP_COMMIT, 0);
   Atomics.store(ctrl, CTRL_ABORT,       0);
+
+  // Initialize all consumer cursor slots to VACANT.
+  // registerConsumer() claims a slot via CAS; releaseConsumer() restores VACANT.
+  for (let i = 0; i < MAX_CONSUMERS; i++) {
+    Atomics.store(ctrl, CTRL_CONSUMER_BASE + i, CONSUMER_SLOT_VACANT);
+  }
 }
 
 // ─── readStrandHeader ─────────────────────────────────────────────────────────

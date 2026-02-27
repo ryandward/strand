@@ -24,10 +24,13 @@
  *   [44..47]  CTRL_HEAP_WRITE  (Int32 index 11)
  *   [48..51]  CTRL_HEAP_COMMIT (Int32 index 12)
  *   [52..55]  CTRL_ABORT       (Int32 index 13)  ← v2 addition
+ *   [56..87]  CONSUMER_SLOT_0..7 (Int32 indices 14–21)  ← v3 addition
+ *             Each slot holds the ack position for one registered consumer.
+ *             CONSUMER_SLOT_VACANT (INT32_MAX) means the slot is unoccupied.
  *
  *   ── Schema section (DataView reads) ────────────────────────────────────
- *   [56..59]  schema_byte_len  u32
- *   [60..511] binary schema descriptor (up to 452 bytes)
+ *   [88..91]  schema_byte_len  u32
+ *   [92..511] binary schema descriptor (up to 420 bytes)
  */
 
 // ─── Magic & Version ──────────────────────────────────────────────────────────
@@ -39,8 +42,10 @@ export const STRAND_MAGIC:   number = 0x5354524e;
  * Header format version.
  * v1 → v2: added OFFSET_HEADER_CRC at byte 24; shifted Atomics words and
  *           schema section by 8 bytes; added CTRL_ABORT.
+ * v2 → v3: added 8 consumer cursor slots (bytes 56–87); shifted
+ *           schema section by 32 bytes; added null validity bitmap.
  */
-export const STRAND_VERSION: number = 2;
+export const STRAND_VERSION: number = 3;
 
 // ─── Header Layout ────────────────────────────────────────────────────────────
 
@@ -67,11 +72,11 @@ export const OFFSET_HEADER_CRC      = 24; // u32
 
 // Bytes 28–55: Atomics control words (Int32Array view, NOT DataView).
 
-export const OFFSET_SCHEMA_BYTE_LEN = 56; // u32
-export const OFFSET_SCHEMA_BYTES    = 60; // variable, up to MAX_SCHEMA_BYTES
+export const OFFSET_SCHEMA_BYTE_LEN = 88; // u32 — was 56 in v2; shifted 32 bytes for consumer slots
+export const OFFSET_SCHEMA_BYTES    = 92; // variable, up to MAX_SCHEMA_BYTES
 
 /** Maximum schema descriptor bytes that fit inside the 512-byte header. */
-export const MAX_SCHEMA_BYTES = HEADER_SIZE - OFFSET_SCHEMA_BYTES; // 452
+export const MAX_SCHEMA_BYTES = HEADER_SIZE - OFFSET_SCHEMA_BYTES; // 420
 
 // ─── Atomics Control Word Indices ─────────────────────────────────────────────
 
@@ -97,6 +102,27 @@ export const CTRL_STATUS      = 10; // byte 40 — stream lifecycle (see STATUS_
 export const CTRL_HEAP_WRITE  = 11; // byte 44 — producer: heap write cursor (monotonic bytes)
 export const CTRL_HEAP_COMMIT = 12; // byte 48 — producer: heap committed bytes
 export const CTRL_ABORT       = 13; // byte 52 — consumer: set to 1 to signal producer abort
+
+// ─── Multi-Consumer Cursor Slots ──────────────────────────────────────────────
+
+/**
+ * Maximum number of simultaneously registered consumers.
+ * Each slot occupies one Int32Array word (4 bytes) in the Atomics section.
+ */
+export const MAX_CONSUMERS = 8;
+
+/**
+ * Sentinel value stored in an unoccupied consumer slot.
+ * INT32_MAX = 0x7FFFFFFF — larger than any realistic sequence number.
+ * A slot holds this value until registerConsumer() claims it via CAS.
+ */
+export const CONSUMER_SLOT_VACANT = 0x7fffffff;
+
+/**
+ * Int32Array index of the first consumer cursor slot.
+ * Slots occupy indices 14 through 14 + MAX_CONSUMERS - 1 (inclusive).
+ */
+export const CTRL_CONSUMER_BASE = 14; // byte 56
 
 /** Int32Array length that covers the entire 512-byte header. */
 export const CTRL_ARRAY_LEN = HEADER_SIZE / 4; // 128

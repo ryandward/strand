@@ -63,6 +63,9 @@ import {
   CTRL_HEAP_WRITE,
   CTRL_HEAP_COMMIT,
   CTRL_ABORT,
+  CTRL_CONSUMER_BASE,
+  MAX_CONSUMERS,
+  CONSUMER_SLOT_VACANT,
   STATUS_INITIALIZING,
   STATUS_STREAMING,
   STATUS_EOS,
@@ -74,6 +77,7 @@ import {
 } from './constants';
 import { readStrandHeader } from './header';
 import {
+  FIELD_FLAG_NULLABLE,
   type FieldDescriptor,
   type StrandMap,
 } from './types';
@@ -138,6 +142,8 @@ export class StrandWriter {
   private readonly map:           StrandMap;
   private readonly fieldIndex:    ReadonlyMap<string, FieldDescriptor>;
   private readonly heapStartByte: number;
+  /** Number of null-bitmap bytes at the start of each record slot. 0 for schemas with no nullable fields. */
+  private readonly bitmapBytes:   number;
 
   constructor(sab: SharedArrayBuffer) {
     // readStrandHeader validates magic → version → schema fingerprint.
@@ -148,6 +154,8 @@ export class StrandWriter {
     this.data         = new DataView(sab);
     this.heapStartByte = heapStart(this.map.index_capacity, this.map.record_stride);
     this.fieldIndex   = new Map(this.map.schema.fields.map(f => [f.name, f]));
+    const nullableCount = this.map.schema.fields.filter(f => f.flags & FIELD_FLAG_NULLABLE).length;
+    this.bitmapBytes  = nullableCount > 0 ? Math.ceil(nullableCount / 8) : 0;
 
     // ── Partial-write recovery ────────────────────────────────────────────────
     //
@@ -303,6 +311,9 @@ export class StrandWriter {
     Atomics.store(this.ctrl, CTRL_HEAP_WRITE,  0);
     Atomics.store(this.ctrl, CTRL_HEAP_COMMIT, 0);
     Atomics.store(this.ctrl, CTRL_ABORT,       0);
+    for (let i = 0; i < MAX_CONSUMERS; i++) {
+      Atomics.store(this.ctrl, CTRL_CONSUMER_BASE + i, CONSUMER_SLOT_VACANT);
+    }
   }
 
   // ── Private: encode ───────────────────────────────────────────────────────
@@ -415,10 +426,10 @@ export class StrandWriter {
     const capacity = this.map.index_capacity;
 
     while (true) {
-      const writeSeq   = Atomics.load(this.ctrl, CTRL_WRITE_SEQ);
-      const readCursor = Atomics.load(this.ctrl, CTRL_READ_CURSOR);
+      const writeSeq      = Atomics.load(this.ctrl, CTRL_WRITE_SEQ);
+      const effectiveCursor = this.computeEffectiveReadCursor();
 
-      if (writeSeq - readCursor + needed <= capacity) return;
+      if (writeSeq - effectiveCursor + needed <= capacity) return;
 
       // Check the abort flag before sleeping.
       if (Atomics.load(this.ctrl, CTRL_ABORT) !== 0) {
@@ -430,12 +441,29 @@ export class StrandWriter {
         );
       }
 
-      // Ring is full. Sleep up to 200 ms for the consumer to advance READ_CURSOR.
-      // signalAbort() fires Atomics.notify(READ_CURSOR) as well, so we wake
-      // promptly even on the abort path.
-      Atomics.wait(this.ctrl, CTRL_READ_CURSOR, readCursor, 200);
+      // Ring is full. Sleep up to 200 ms for any consumer to advance.
+      // All acknowledgeRead() calls (tokenless or with token) fire
+      // Atomics.notify on CTRL_READ_CURSOR, so we always wake promptly.
+      const legacyCursor = Atomics.load(this.ctrl, CTRL_READ_CURSOR);
+      Atomics.wait(this.ctrl, CTRL_READ_CURSOR, legacyCursor, 200);
       // On return ('ok', 'not-equal', or 'timed-out'), loop and re-check.
     }
+  }
+
+  /**
+   * Effective read cursor for backpressure:
+   *   multi-consumer mode (any slot registered): min of all registered slots.
+   *   single-consumer / legacy mode: CTRL_READ_CURSOR.
+   */
+  private computeEffectiveReadCursor(): number {
+    let min = -1;
+    for (let i = 0; i < MAX_CONSUMERS; i++) {
+      const v = Atomics.load(this.ctrl, CTRL_CONSUMER_BASE + i);
+      if (v !== CONSUMER_SLOT_VACANT) {
+        min = min < 0 ? v : Math.min(min, v);
+      }
+    }
+    return min >= 0 ? min : Atomics.load(this.ctrl, CTRL_READ_CURSOR);
   }
 
   // ── Private: write one record ─────────────────────────────────────────────
@@ -452,6 +480,34 @@ export class StrandWriter {
     // Fast modulo for power-of-2 index_capacity.
     const slot         = seq & (this.map.index_capacity - 1);
     const recordOffset = INDEX_START + slot * this.map.record_stride;
+
+    // ── Null validity bitmap ────────────────────────────────────────────────
+    //
+    // The first bitmapBytes bytes of each slot hold one bit per nullable field.
+    // Bit k = 1 → the k-th nullable field was written; 0 → it was omitted (null).
+    //
+    // Ring slots may be reused (after a ring lap), so we must zero the bitmap
+    // before setting bits — stale bits from a previous record must not leak.
+    if (this.bitmapBytes > 0) {
+      for (let b = 0; b < this.bitmapBytes; b++) {
+        this.data.setUint8(recordOffset + b, 0);
+      }
+      for (const field of this.map.schema.fields) {
+        if (
+          (field.flags & FIELD_FLAG_NULLABLE) &&
+          field.nullableBitIndex !== undefined &&
+          record[field.name] !== null &&
+          record[field.name] !== undefined
+        ) {
+          const byteIdx = Math.floor(field.nullableBitIndex / 8);
+          const bit     = 1 << (field.nullableBitIndex % 8);
+          this.data.setUint8(
+            recordOffset + byteIdx,
+            this.data.getUint8(recordOffset + byteIdx) | bit,
+          );
+        }
+      }
+    }
 
     for (const field of this.map.schema.fields) {
       const value  = record[field.name] ?? null;

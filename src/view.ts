@@ -44,6 +44,9 @@ import {
   CTRL_READ_CURSOR,
   CTRL_STATUS,
   CTRL_ABORT,
+  CTRL_CONSUMER_BASE,
+  MAX_CONSUMERS,
+  CONSUMER_SLOT_VACANT,
   STATUS_INITIALIZING,
   STATUS_STREAMING,
   STATUS_EOS,
@@ -53,6 +56,7 @@ import {
 import { readStrandHeader } from './header';
 import {
   FIELD_BYTE_WIDTHS,
+  FIELD_FLAG_NULLABLE,
   FIELD_FLAG_SORTED_ASC,
   type FieldDescriptor,
   type FieldType,
@@ -151,54 +155,81 @@ export class RecordCursor {
     return true;
   }
 
+  // ── Null bitmap check ──────────────────────────────────────────────────────
+
+  /**
+   * Returns true when `f` is a nullable field that was omitted from the
+   * record at the current seek position. The null validity bitmap lives at
+   * the very start of each record slot (bytes 0..bitmapBytes-1).
+   *
+   * Bit `f.nullableBitIndex % 8` of byte `Math.floor(f.nullableBitIndex / 8)`
+   * is 1 when the field was written, 0 when it was omitted (null).
+   */
+  private _isNull(f: FieldDescriptor): boolean {
+    if (!(f.flags & FIELD_FLAG_NULLABLE) || f.nullableBitIndex === undefined) return false;
+    const byteIndex  = Math.floor(f.nullableBitIndex / 8);
+    const bit        = 1 << (f.nullableBitIndex % 8);
+    const bitmapByte = this._data.getUint8(this._recordOffset + byteIndex);
+    return !(bitmapByte & bit);
+  }
+
   // ── Typed accessors ────────────────────────────────────────────────────────
-  // Each returns null if the field does not exist or has the wrong type.
+  // Each returns null if the field does not exist, has the wrong type, or
+  // (for nullable fields) was omitted from the record at the current seq.
 
   getI32(name: string): number | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'i32') return null;
+    if (this._isNull(f)) return null;
     return this._data.getInt32(this._recordOffset + f.byteOffset, /* le */ true);
   }
 
   getU32(name: string): number | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'u32') return null;
+    if (this._isNull(f)) return null;
     return this._data.getUint32(this._recordOffset + f.byteOffset, true);
   }
 
   getI64(name: string): bigint | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'i64') return null;
+    if (this._isNull(f)) return null;
     return this._data.getBigInt64(this._recordOffset + f.byteOffset, true);
   }
 
   getF32(name: string): number | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'f32') return null;
+    if (this._isNull(f)) return null;
     return this._data.getFloat32(this._recordOffset + f.byteOffset, true);
   }
 
   getF64(name: string): number | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'f64') return null;
+    if (this._isNull(f)) return null;
     return this._data.getFloat64(this._recordOffset + f.byteOffset, true);
   }
 
   getU16(name: string): number | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'u16') return null;
+    if (this._isNull(f)) return null;
     return this._data.getUint16(this._recordOffset + f.byteOffset, true);
   }
 
   getU8(name: string): number | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'u8') return null;
+    if (this._isNull(f)) return null;
     return this._data.getUint8(this._recordOffset + f.byteOffset);
   }
 
   getBool(name: string): boolean | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'bool8') return null;
+    if (this._isNull(f)) return null;
     return this._data.getUint8(this._recordOffset + f.byteOffset) !== 0;
   }
 
@@ -220,6 +251,7 @@ export class RecordCursor {
   getString(name: string): string | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'utf8') return null;
+    if (this._isNull(f)) return null;
 
     const cached = this._stringCache.get(name);
     if (cached !== undefined) return cached;
@@ -264,6 +296,7 @@ export class RecordCursor {
   getJson(name: string): unknown {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'json') return null;
+    if (this._isNull(f)) return null;
 
     const cached = this._jsonCache.get(name);
     if (cached !== undefined) return cached;
@@ -305,6 +338,7 @@ export class RecordCursor {
   getRef(name: string): string | null {
     const f = this._fieldIndex.get(name);
     if (!f || f.type !== 'utf8_ref') return null;
+    if (this._isNull(f)) return null;
 
     const handle = this._data.getUint32(this._recordOffset + f.byteOffset, true);
     return this._internTableCell.value[handle] ?? null;
@@ -612,14 +646,21 @@ export class StrandView {
   /**
    * Advance the consumer read cursor to `upTo`.
    *
-   * This signals to the producer that records [0..upTo) have been processed
-   * and their ring slots may be reused. If the producer was stalled waiting
-   * for ring space, this call unblocks it.
+   * Without `token` (single-consumer mode): advances the global CTRL_READ_CURSOR,
+   * exactly as in v2. This is the default for callers that have not called
+   * registerConsumer().
+   *
+   * With `token` (multi-consumer mode): advances only the per-consumer cursor
+   * for that token. The producer gates on effectiveReadCursor (the minimum
+   * across all registered consumers and the global cursor).
+   *
+   * Always fires Atomics.notify on CTRL_READ_CURSOR to wake a stalled producer
+   * regardless of which cursor was advanced.
    *
    * Only call this after you are done reading all records up to (not including)
    * `upTo`. Do not call with a value higher than committedCount.
    */
-  acknowledgeRead(upTo: number): void {
+  acknowledgeRead(upTo: number, token?: number): void {
     const committed = Atomics.load(this.ctrl, CTRL_COMMIT_SEQ);
     if (upTo > committed) {
       throw new RangeError(
@@ -627,8 +668,80 @@ export class StrandView {
         `Only acknowledge records that have already been committed.`,
       );
     }
-    Atomics.store(this.ctrl, CTRL_READ_CURSOR, upTo);
+    if (token !== undefined) {
+      Atomics.store(this.ctrl, CTRL_CONSUMER_BASE + token, upTo);
+    } else {
+      Atomics.store(this.ctrl, CTRL_READ_CURSOR, upTo);
+    }
+    // Always notify on CTRL_READ_CURSOR — the producer always waits there.
     Atomics.notify(this.ctrl, CTRL_READ_CURSOR, 1);
+  }
+
+  // ── Multi-consumer registration ────────────────────────────────────────────
+
+  /**
+   * Register this caller as a named consumer and return a token.
+   *
+   * Claims the first vacant consumer cursor slot via CAS. The returned token
+   * is an integer in [0, MAX_CONSUMERS). Pass it to acknowledgeRead() and
+   * releaseConsumer() to identify this consumer.
+   *
+   * The producer's ring-space gate becomes the minimum of:
+   *   - The global CTRL_READ_CURSOR (advanced by tokenless acknowledgeRead)
+   *   - All registered consumer cursors (advanced by token acknowledgeRead)
+   *
+   * Throws RangeError if all MAX_CONSUMERS slots are already occupied.
+   */
+  registerConsumer(): number {
+    for (let i = 0; i < MAX_CONSUMERS; i++) {
+      const prev = Atomics.compareExchange(
+        this.ctrl, CTRL_CONSUMER_BASE + i, CONSUMER_SLOT_VACANT, 0,
+      );
+      if (prev === CONSUMER_SLOT_VACANT) return i;
+    }
+    throw new RangeError(
+      `All ${MAX_CONSUMERS} consumer slots are occupied. ` +
+      `Call releaseConsumer() when a consumer is done to free its slot.`,
+    );
+  }
+
+  /**
+   * Release a consumer slot, removing it from backpressure accounting.
+   *
+   * After this call the token is invalid. A stalled producer is woken
+   * immediately so it can recompute effectiveReadCursor without the
+   * released slot.
+   */
+  releaseConsumer(token: number): void {
+    Atomics.store(this.ctrl, CTRL_CONSUMER_BASE + token, CONSUMER_SLOT_VACANT);
+    Atomics.notify(this.ctrl, CTRL_READ_CURSOR, 1);
+  }
+
+  /**
+   * The minimum acknowledged position across all cursors.
+   *
+   * This is the value the producer uses to determine how many ring slots it
+   * may reclaim. It is the minimum of:
+   *   - CTRL_READ_CURSOR  (global / single-consumer cursor)
+   *   - All registered consumer cursors (non-VACANT slots)
+   *
+   * With no consumers registered, equals CTRL_READ_CURSOR.
+   */
+  get effectiveReadCursor(): number {
+    // When any consumer is registered (multi-consumer mode), the effective gate
+    // is the minimum of all registered consumer positions. The global
+    // CTRL_READ_CURSOR is not included — it applies only in single-consumer mode.
+    //
+    // When no consumers are registered (single-consumer / legacy mode), the
+    // global CTRL_READ_CURSOR is the sole gate (unchanged v2 behaviour).
+    let min = -1; // sentinel: no registered consumer seen yet
+    for (let i = 0; i < MAX_CONSUMERS; i++) {
+      const v = Atomics.load(this.ctrl, CTRL_CONSUMER_BASE + i);
+      if (v !== CONSUMER_SLOT_VACANT) {
+        min = min < 0 ? v : Math.min(min, v);
+      }
+    }
+    return min >= 0 ? min : Atomics.load(this.ctrl, CTRL_READ_CURSOR);
   }
 
   /**

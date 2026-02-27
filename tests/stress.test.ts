@@ -40,6 +40,7 @@ import {
   StrandHeaderError,
   HEADER_SIZE,
   OFFSET_HEADER_CRC,
+  OFFSET_SCHEMA_BYTE_LEN,
   CTRL_WRITE_SEQ,
   CTRL_COMMIT_SEQ,
   CTRL_HEAP_WRITE,
@@ -769,10 +770,9 @@ describe('invariants: input validation', () => {
   it('readStrandHeader: throws StrandHeaderError when schema_byte_len is 0', () => {
     const { sab } = makeSimpleSab();
 
-    // Overwrite schema_byte_len at OFFSET_SCHEMA_BYTE_LEN (byte 56) to 0.
-    // This bypasses the CRC (which only covers bytes 0–23) and simulates
-    // a corrupt schema section.
-    new DataView(sab).setUint32(56, 0, /* le */ true);
+    // Overwrite schema_byte_len to 0 to simulate a corrupt schema section.
+    // This bypasses the CRC (which only covers bytes 0–23).
+    new DataView(sab).setUint32(OFFSET_SCHEMA_BYTE_LEN, 0, /* le */ true);
 
     expect(() => readStrandHeader(sab)).toThrowError(StrandHeaderError);
   });
