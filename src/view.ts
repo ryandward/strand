@@ -53,7 +53,9 @@ import {
 import { readStrandHeader } from './header';
 import {
   FIELD_BYTE_WIDTHS,
+  FIELD_FLAG_SORTED_ASC,
   type FieldDescriptor,
+  type FieldType,
   type StrandMap,
   type StrandStatus,
 } from './types';
@@ -63,6 +65,13 @@ import {
 // TextDecoder is stateless (when not used in streaming mode), so one instance
 // is safe to reuse across all getString() calls across all RecordCursor instances.
 const utf8Decoder = new TextDecoder();
+
+// Field types on which findFirst() can perform a binary comparison.
+// utf8 / utf8_ref / json / bool8 are excluded: their binary representations
+// are either heap pointers (not the value itself) or require string collation.
+const SORTABLE_TYPES = new Set<FieldType>([
+  'i32', 'u32', 'i64', 'f32', 'f64', 'u16', 'u8',
+]);
 
 // ─── RecordCursor ─────────────────────────────────────────────────────────────
 
@@ -445,6 +454,123 @@ export class StrandView {
       this.map.index_capacity,
       this.map.record_stride,
     );
+  }
+
+  // ── Sorted seek ────────────────────────────────────────────────────────────
+
+  /**
+   * Binary-search the committed ring for the first record where `field >= value`.
+   *
+   * Requirements:
+   *   - The field must be declared with FIELD_FLAG_SORTED_ASC in the schema.
+   *     Records must actually arrive in non-decreasing order; this method
+   *     does not verify the invariant at runtime.
+   *   - The field must be a numeric type: i32, u32, i64, f32, f64, u16, u8.
+   *     utf8, utf8_ref, json, and bool8 are not supported.
+   *
+   * Returns the lowest seq number in the committed window where the field
+   * value is >= `value`, or -1 if no such record exists in the current
+   * committed window.
+   *
+   * -1 has two distinct causes:
+   *   a) All committed records have field < value (target is ahead of stream).
+   *      Re-arm waitForCommit() and retry.
+   *   b) The target was in a ring slot that has been lapped. The caller must
+   *      restart the stream or seek from the oldest available record.
+   *
+   * For i64 fields, `value` may be either a bigint or a number (auto-coerced).
+   * For all other types, passing a bigint coerces to Number.
+   *
+   * O(log index_capacity).
+   */
+  findFirst(field: string, value: number | bigint): number {
+    const f = this.fieldIndex.get(field);
+    if (!f) {
+      throw new TypeError(
+        `findFirst: unknown field '${field}'. ` +
+        `Available fields: ${[...this.fieldIndex.keys()].join(', ')}.`,
+      );
+    }
+
+    if (!(f.flags & FIELD_FLAG_SORTED_ASC)) {
+      throw new TypeError(
+        `findFirst: field '${field}' does not have FIELD_FLAG_SORTED_ASC. ` +
+        `Only fields declared with FIELD_FLAG_SORTED_ASC support binary seek. ` +
+        `For unsorted fields, scan with a cursor instead.`,
+      );
+    }
+
+    if (!SORTABLE_TYPES.has(f.type)) {
+      throw new TypeError(
+        `findFirst: field '${field}' has type '${f.type}', which is not a ` +
+        `sortable numeric type. Sortable types: ${[...SORTABLE_TYPES].join(', ')}. ` +
+        `utf8, utf8_ref, json, and bool8 store indirect or non-ordinal values.`,
+      );
+    }
+
+    const committed = Atomics.load(this.ctrl, CTRL_COMMIT_SEQ);
+    if (committed === 0) return -1;
+
+    const oldest = Math.max(0, committed - this.map.index_capacity);
+
+    // Coerce the target value to the field's native comparison type once,
+    // outside the hot loop.
+    const isI64   = f.type === 'i64';
+    const target: number | bigint = isI64
+      ? (typeof value === 'bigint' ? value : BigInt(Math.trunc(value as number)))
+      : (typeof value === 'number' ? value : Number(value as bigint));
+
+    // Standard lower_bound: find the leftmost seq where fieldValue >= target.
+    // Invariant: all seq in [oldest, lo)  have fieldValue < target.
+    //            all seq in [hi, committed) have fieldValue >= target (or hi===committed).
+    let lo = oldest;
+    let hi = committed;
+
+    while (lo < hi) {
+      // Safe midpoint: avoids integer overflow for very large seq numbers.
+      const mid = lo + Math.floor((hi - lo) / 2);
+      const v   = this.readNumericAt(mid, f);
+
+      const less = isI64
+        ? (v as bigint)  < (target as bigint)
+        : (v as number)  < (target as number);
+
+      if (less) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+
+    // lo is now the first seq where field >= target.
+    // If lo === committed, no record in the current window satisfies it.
+    return lo < committed ? lo : -1;
+  }
+
+  /**
+   * Read the raw numeric value of `field` at ring seq `seq`.
+   * No bounds check, no cache — used only by findFirst's binary search loop.
+   */
+  private readNumericAt(seq: number, f: FieldDescriptor): number | bigint {
+    const base =
+      INDEX_START +
+      (seq & (this.map.index_capacity - 1)) * this.map.record_stride +
+      f.byteOffset;
+
+    switch (f.type) {
+      case 'u32': return this.data.getUint32(base,    true);
+      case 'i32': return this.data.getInt32(base,     true);
+      case 'i64': return this.data.getBigInt64(base,  true);
+      case 'f32': return this.data.getFloat32(base,   true);
+      case 'f64': return this.data.getFloat64(base,   true);
+      case 'u16': return this.data.getUint16(base,    true);
+      case 'u8':  return this.data.getUint8(base);
+      default:
+        // Unreachable: SORTABLE_TYPES guard in findFirst() prevents this.
+        throw new TypeError(
+          `readNumericAt: field '${f.name}' (type '${f.type}') is not numeric.`,
+        );
+    }
   }
 
   // ── Async notification ─────────────────────────────────────────────────────
