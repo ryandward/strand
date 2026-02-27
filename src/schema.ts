@@ -126,7 +126,9 @@ export function decodeSchema(bytes: Uint8Array): BinarySchemaDescriptor | null {
     if (type === undefined) return null; // unknown type tag — corrupt or newer version
     if (cursor + 5 + nameLen > bytes.length) return null;
 
-    // .slice() copies out of SharedArrayBuffer — TextDecoder rejects SAB-backed views
+    // .slice() copies into a plain ArrayBuffer. .subarray() would return
+    // another SAB-backed view, which TextDecoder.decode() rejects in browsers
+    // (spec forbids decoding shared views; Node.js allows it, masking the bug).
     const name      = decoder.decode(bytes.slice(cursor + 5, cursor + 5 + nameLen));
     const rawLen    = 5 + nameLen;
     const paddedLen = Math.ceil(rawLen / 4) * 4;

@@ -274,7 +274,11 @@ export class RecordCursor {
       );
     }
 
-    // Copy out of SAB — TextDecoder rejects SharedArrayBuffer-backed views.
+    // .slice() copies the heap bytes into a plain ArrayBuffer before decoding.
+    // TextDecoder.decode() rejects SAB-backed views in all browsers (spec
+    // requirement); Node.js allows it, so tests pass without this, masking
+    // the bug. The per-record _stringCache means each field is only copied
+    // once per seek(), so the overhead is negligible on the hot read path.
     const bytes = new Uint8Array(this._sab, physOffset, heapLen).slice();
     const decoded = utf8Decoder.decode(bytes);
     this._stringCache.set(name, decoded);
@@ -319,6 +323,7 @@ export class RecordCursor {
       );
     }
 
+    // .slice() — same reason as getString(): TextDecoder rejects SAB-backed views in browsers.
     const bytes   = new Uint8Array(this._sab, physOffset, heapLen).slice();
     const text    = utf8Decoder.decode(bytes);
     const parsed: unknown = JSON.parse(text);
