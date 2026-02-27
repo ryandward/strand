@@ -34,10 +34,10 @@ A Worker thread writes typed records into a lock-free ring buffer; the main thre
 ## Sequence diagram
 
 ```
-Main thread                        SharedArrayBuffer             Worker thread
-     │                                      │                          │
-     │  new SharedArrayBuffer(map.total_bytes)                         │
-     │  initStrandHeader(sab, map)           │                          │
+Main thread                         SharedArrayBuffer             Worker thread
+     │                                       │                          │
+     │new SharedArrayBuffer(map.total_bytes) |                          │
+     │initStrandHeader(sab, map)             │                          │
      │──────────────────────────────────────>│                          │
      │  new StrandView(sab)                  │                          │
      │  allocateCursor()                     │                          │
@@ -46,7 +46,7 @@ Main thread                        SharedArrayBuffer             Worker thread
      │                                       │  begin()                 │
      │                                       │<─────────────────────────│
      │                                       │                          │
-     │  waitForCommit(0) ···waiting···        │  writeRecordBatch([...]) │
+     │  waitForCommit(0) ···waiting···       │  writeRecordBatch([...]) │
      │                                       │<─────────────────────────│
      │                              COMMIT_SEQ += N                     │
      │                              Atomics.notify ──────────────────>  │
@@ -57,7 +57,7 @@ Main thread                        SharedArrayBuffer             Worker thread
      │    cursor.getString('label')          │  (blocks if ring full)   │
      │  acknowledgeRead(N) ─────────────────>│ ── wakes writer ──────>  │
      │                                       │                          │
-     │  waitForCommit(N) ···waiting···        │  finalize()              │
+     │  waitForCommit(N) ···waiting···       │  finalize()              │
      │                              STATUS = EOS                        │
      │<── resolves ──────────────────────────│                          │
      │  view.status === 'eos' → done         │                          │
