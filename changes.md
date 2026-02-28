@@ -1,5 +1,80 @@
 # Changes
 
+## Feat: vectorized bitset primitives + `StrandView.getFilterBitset`
+
+**Non-breaking addition.**
+
+New module `src/bitset.ts` and a new `StrandView` method that let callers evaluate filter predicates directly against the SAB ring buffer, producing a `Uint32Array` bitset in O(N/32) time with zero per-record allocations.
+
+### New exports
+
+```typescript
+import {
+  type FilterPredicate,
+  createBitset,
+  computeIntersection,
+  popcount,
+  forEachSet,
+} from '@strand/core';
+```
+
+### `FilterPredicate`
+
+Discriminated union describing a match condition against a single field:
+
+```typescript
+type FilterPredicate =
+  | { kind: 'between'; lo: number; hi: number }  // inclusive range
+  | { kind: 'eq';      value: number }            // exact match
+  | { kind: 'in';      handles: ReadonlySet<number> }; // handle-set membership (utf8_ref)
+```
+
+### `createBitset(bitCount)` → `Uint32Array`
+
+Allocate a zeroed bitset for `bitCount` records. Bit j is at word `j >>> 5`, shift `j & 31`.
+
+### `computeIntersection(bitsets)` → `Uint32Array`
+
+Bitwise AND across all inputs. Returns a new bitset — source buffers are never mutated. All inputs must be built from the same committed-count snapshot. O(N/32).
+
+### `popcount(bs, limit?)` → `number`
+
+Hamming-weight count of set bits, tail-masked for partial final words. O(N/32).
+
+### `forEachSet(bs, limit, fn)` → `void`
+
+Iterate set bits in ascending order. Uses `word & -word` to isolate the lowest set bit and `Math.clz32` for O(1) position resolution within each word. Zero words are skipped in O(1). Total work proportional to the number of matching records.
+
+### `StrandView.getFilterBitset(field, predicate)` → `Uint32Array`
+
+Scans every committed record in the active ring window and returns a bitset where bit j is set when the record at `seq = windowStart + j` satisfies `predicate`.
+
+```typescript
+const bs  = view.getFilterBitset('score', { kind: 'between', lo: 0.5, hi: 1.0 });
+const ws  = view.windowStart;
+const n   = view.committedCount - ws;
+
+forEachSet(bs, n, j => {
+  const seq = ws + j;
+  cursor.seek(seq);
+  render(cursor);
+});
+```
+
+**Hot-loop properties:**
+- No `RecordCursor` instantiation — DataView field offsets pre-computed outside loop.
+- One-time type dispatch (switch runs once per call, not once per record).
+- No JS object allocated per record — only a conditional bit write per match.
+
+**Supported field types:** `i32`, `u32`, `f32`, `f64`, `u16`, `u8`, `bool8`, `utf8_ref`.
+Throws `TypeError` for heap-indirected types (`utf8`, `json`, `bytes`, `i32_array`, `f32_array`) and `i64` (BigInt incompatible with number arithmetic).
+
+### `StrandView.windowStart` → `number`
+
+`Math.max(0, committedCount - indexCapacity)` — the inclusive start of the accessible ring window. Used to convert `forEachSet` bit indices back to absolute sequence numbers.
+
+---
+
 ## Feat: v5 header — compact schema encoding + full column names in metadata
 
 **Version:** v5 (STRAND_VERSION 4 → 5)

@@ -319,9 +319,11 @@ For producers that hold a direct SAB reference (WASM linear memory, native exten
 | `registerConsumer()` | Claim a per-consumer cursor slot (multi-consumer mode). Returns a token. |
 | `releaseConsumer(token)` | Release a consumer slot; wakes any stalled producer immediately. |
 | `findFirst(field, value)` | Binary-search committed records for the first where `field >= value`. O(log N). Requires `FIELD_FLAG_SORTED_ASC`. |
+| `getFilterBitset(field, predicate)` | Scan the active ring window and return a `Uint32Array` bitset — bit j set when `seq = windowStart + j` satisfies the predicate. O(N/32). See [Vectorized filtering](#vectorized-filtering). |
 | `signalAbort()` | Set `CTRL_ABORT = 1`; wake a stalled producer |
 | `updateInternTable(table)` | Replace the `utf8_ref` intern table; all allocated cursors observe the change immediately |
 | `committedCount` | `Atomics.load(COMMIT_SEQ)` — records safe to read |
+| `windowStart` | `Math.max(0, committedCount - indexCapacity)` — inclusive start of the accessible ring window |
 | `status` | `'initializing' \| 'streaming' \| 'eos' \| 'error'` |
 | `map.meta` | Optional producer metadata parsed from header (v4+). `undefined` if not supplied. |
 
@@ -346,6 +348,60 @@ For producers that hold a direct SAB reference (WASM linear memory, native exten
 | `getF32Array(name)` | `Float32Array \| null` | Zero-copy view into SAB heap for an `f32_array` field |
 | `get(name)` | `number \| bigint \| boolean \| string \| unknown` | Generic accessor |
 | `seq` | `number` | Current sequence number; `-1` before first seek |
+
+### Vectorized filtering
+
+For hot-path filtering (millions of records, reactive UI), `getFilterBitset` avoids the per-record overhead of `RecordCursor.seek()` by reading field bytes directly from the SAB `DataView` and writing a packed `Uint32Array` bitset. Multiple predicates are combined with `computeIntersection` (bitwise AND, O(N/32)).
+
+```typescript
+import {
+  type FilterPredicate,
+  computeIntersection,
+  forEachSet,
+} from '@strand/core';
+
+// Build one bitset per active filter — each scans the SAB once.
+const bsScore  = view.getFilterBitset('score',  { kind: 'between', lo: 0.5,  hi: 1.0 });
+const bsChrom  = view.getFilterBitset('chrom',  { kind: 'in', handles: new Set([2, 7]) });
+const bsStrand = view.getFilterBitset('strand', { kind: 'eq', value: 0 });
+
+// Intersect in O(N/32) — 32 records resolved per CPU instruction.
+const matches = computeIntersection([bsScore, bsChrom, bsStrand]);
+
+// Walk only the matching records.
+const ws = view.windowStart;
+const n  = view.committedCount - ws;
+
+forEachSet(matches, n, j => {
+  const seq = ws + j;
+  cursor.seek(seq);
+  render(cursor);
+});
+```
+
+**`FilterPredicate`** — discriminated union:
+
+| `kind` | Fields | Matches when |
+|--------|--------|--------------|
+| `between` | `lo: number, hi: number` | `lo ≤ value ≤ hi` (inclusive) |
+| `eq` | `value: number` | `field === value` |
+| `in` | `handles: ReadonlySet<number>` | intern-table handle is a member of the set |
+
+**Supported field types:** `i32`, `u32`, `f32`, `f64`, `u16`, `u8`, `bool8`, `utf8_ref`.
+Heap-indirected types (`utf8`, `json`, `bytes`, `i32_array`, `f32_array`) and `i64` throw `TypeError`.
+
+**Bitset utilities:**
+
+| Function | Description |
+|----------|-------------|
+| `createBitset(bitCount)` | Allocate a zeroed `Uint32Array` for `bitCount` bits |
+| `computeIntersection(bitsets)` | Bitwise AND — returns a new bitset, O(N/32) |
+| `popcount(bs, limit?)` | Count set bits, O(N/32) |
+| `forEachSet(bs, limit, fn)` | Iterate set bits in ascending order; uses `Math.clz32` for O(1) bit isolation |
+
+All bitsets built in the same call to `getFilterBitset` (same `committedCount` snapshot) are directly compatible with `computeIntersection`. Bit j in any bitset represents `seq = windowStart + j`.
+
+---
 
 ### Field types
 

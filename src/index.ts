@@ -60,6 +60,15 @@ export {
 // ─── View ─────────────────────────────────────────────────────────────────────
 export { StrandView, RecordCursor } from './view';
 
+// ─── Bitset ───────────────────────────────────────────────────────────────────
+export type { FilterPredicate } from './bitset';
+export {
+  createBitset,
+  computeIntersection,
+  popcount,
+  forEachSet,
+} from './bitset';
+
 // ─── Writer ───────────────────────────────────────────────────────────────────
 export { StrandWriter, StrandCapacityError, StrandAbortError } from './writer';
 export type { WritableValue, WritableRecord } from './writer';

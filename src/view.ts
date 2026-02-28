@@ -63,6 +63,7 @@ import {
   type StrandMap,
   type StrandStatus,
 } from './types';
+import { createBitset, type FilterPredicate } from './bitset';
 
 // ─── Module-level shared decoder ──────────────────────────────────────────────
 
@@ -830,6 +831,139 @@ export class StrandView {
       }
     }
     return min >= 0 ? min : Atomics.load(this.ctrl, CTRL_READ_CURSOR);
+  }
+
+  // ── Vectorized bitset scan ─────────────────────────────────────────────────
+
+  /**
+   * Inclusive start of the accessible ring window.
+   *
+   * Records older than this seq have been overwritten. Use this to convert
+   * forEachSet bit indices back to absolute seq numbers:
+   *   forEachSet(bs, view.committedCount - view.windowStart, j => {
+   *     const seq = view.windowStart + j;
+   *   });
+   */
+  get windowStart(): number {
+    return Math.max(0, this.committedCount - this.map.index_capacity);
+  }
+
+  /**
+   * Scan every committed record in the active ring window and return a bitset
+   * where bit j is set when the record at seq `windowStart + j` satisfies
+   * `predicate` for `field`.
+   *
+   * Supported field types: i32, u32, f32, f64, u16, u8, bool8, utf8_ref.
+   * Heap-indirected types (utf8, json, bytes, i32_array, f32_array) and i64
+   * are not supported — they throw TypeError.
+   *
+   * Architectural constraints:
+   *
+   *   Windowed reality  — scans only [windowStart, committedCount).
+   *   Logical indexing  — bit j corresponds to seq = windowStart + j. Bitsets
+   *                       built from the same committedCount snapshot are
+   *                       directly comparable via computeIntersection.
+   *   Hot-loop purity   — no RecordCursor, no JS object per record. Field
+   *                       byte-offsets and the DataView reader are resolved
+   *                       once outside the loop; the loop body is a single
+   *                       DataView read + predicate test + conditional bit set.
+   *
+   * @param field     Field name as declared in the schema.
+   * @param predicate FilterPredicate describing the matching condition.
+   * @returns         Uint32Array bitset. Length = ceil(windowSize / 32).
+   */
+  getFilterBitset(field: string, predicate: FilterPredicate): Uint32Array {
+    const f = this.fieldIndex.get(field);
+    if (!f) {
+      throw new TypeError(
+        `getFilterBitset: unknown field '${field}'. ` +
+        `Available fields: ${[...this.fieldIndex.keys()].join(', ')}.`,
+      );
+    }
+
+    // Reject heap-indirected types and i64 (BigInt doesn't fit JS number arithmetic).
+    switch (f.type) {
+      case 'utf8':
+      case 'json':
+      case 'bytes':
+      case 'i64':
+      case 'i32_array':
+      case 'f32_array':
+        throw new TypeError(
+          `getFilterBitset: field '${field}' has type '${f.type}', which is ` +
+          `heap-indirected or BigInt-valued. Supported types: ` +
+          `i32, u32, f32, f64, u16, u8, bool8, utf8_ref.`,
+        );
+    }
+
+    const committed  = Atomics.load(this.ctrl, CTRL_COMMIT_SEQ);
+    const startSeq   = Math.max(0, committed - this.map.index_capacity);
+    const windowSize = committed - startSeq;
+
+    const bs = createBitset(windowSize);
+    if (windowSize === 0) return bs;
+
+    // ── Pre-calculate constants — all live outside the hot loop ──────────────
+    const ringMask   = this.map.index_capacity - 1;
+    const stride     = this.map.record_stride;
+    const byteOffset = f.byteOffset;
+    const data       = this.data;
+
+    // ── One-time type dispatch — produces a single typed reader closure ───────
+    // The switch runs once per getFilterBitset call, not once per record.
+    type Reader = (base: number) => number;
+    let read: Reader;
+    switch (f.type) {
+      case 'i32':      read = (b) => data.getInt32(b,    true); break;
+      case 'u32':      read = (b) => data.getUint32(b,   true); break;
+      case 'f32':      read = (b) => data.getFloat32(b,  true); break;
+      case 'f64':      read = (b) => data.getFloat64(b,  true); break;
+      case 'u16':      read = (b) => data.getUint16(b,   true); break;
+      case 'u8':       read = (b) => data.getUint8(b);          break;
+      case 'bool8':    read = (b) => data.getUint8(b);          break;
+      case 'utf8_ref': read = (b) => data.getUint32(b,   true); break;
+      default:
+        // Unreachable: all unsupported types rejected above.
+        throw new TypeError(`getFilterBitset: unsupported type '${f.type}'.`);
+    }
+
+    // ── Hot loop — single DataView read + predicate test + conditional bit set.
+    // No cursor, no object allocation, no per-record type dispatch.
+    if (predicate.kind === 'between') {
+      const { lo, hi } = predicate;
+      for (let seq = startSeq; seq < committed; seq++) {
+        const base = INDEX_START + (seq & ringMask) * stride + byteOffset;
+        const v = read(base);
+        if (v >= lo && v <= hi) {
+          const j = seq - startSeq;
+          const w = j >>> 5;
+          bs[w] = bs[w]! | (1 << (j & 31));
+        }
+      }
+    } else if (predicate.kind === 'eq') {
+      const { value } = predicate;
+      for (let seq = startSeq; seq < committed; seq++) {
+        const base = INDEX_START + (seq & ringMask) * stride + byteOffset;
+        if (read(base) === value) {
+          const j = seq - startSeq;
+          const w = j >>> 5;
+          bs[w] = bs[w]! | (1 << (j & 31));
+        }
+      }
+    } else {
+      // kind === 'in'
+      const { handles } = predicate;
+      for (let seq = startSeq; seq < committed; seq++) {
+        const base = INDEX_START + (seq & ringMask) * stride + byteOffset;
+        if (handles.has(read(base))) {
+          const j = seq - startSeq;
+          const w = j >>> 5;
+          bs[w] = bs[w]! | (1 << (j & 31));
+        }
+      }
+    }
+
+    return bs;
   }
 
   /**
