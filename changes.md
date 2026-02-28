@@ -1,5 +1,63 @@
 # Changes
 
+## Feat: `StrandView.getConstrainedRanges` — intersection-driven min/max
+
+**Non-breaking addition.**
+
+Second half of the vectorized constraint pipeline. Takes the output of
+`computeIntersection` and derives per-field min/max by walking only the
+matching records — no full scan, no JS object allocation per record.
+
+### Usage
+
+```typescript
+// Stage 1: build bitsets for each active predicate.
+const bsScore = view.getFilterBitset('score', { kind: 'between', lo: 0.5, hi: 1.0 });
+const bsChrom = view.getFilterBitset('chrom', { kind: 'in', handles: chrSet });
+
+// Stage 2: intersect — O(N/32).
+const intersection = computeIntersection([bsScore, bsChrom]);
+
+// Stage 3: derive constrained ranges from the filtered view.
+const ranges = view.getConstrainedRanges(intersection);
+// ranges === {
+//   start: { min: 102_400, max: 2_891_003 },
+//   end:   { min: 102_423, max: 2_891_026 },
+//   score: { min: 0.5,     max: 0.98      },
+//   ...
+// }
+```
+
+### API
+
+```typescript
+// New type
+type ConstrainedRanges = Record<string, { min: number; max: number }>;
+
+// New method on StrandView
+getConstrainedRanges(intersectionBitset: Uint32Array): ConstrainedRanges;
+```
+
+`ConstrainedRanges` is also exported from the package root.
+
+### Performance properties
+
+- Visits only the `popcount(intersection)` matching records, not all committed records.
+  A 1% pass-rate filter makes this ~100× faster than a na×ve full scan.
+- Type dispatch runs once per call (not per record): a typed closure per field is
+  built before the loop.
+- Accumulators are parallel `Float64Array` pairs (min/max) — sequential memory
+  layout, cache-friendly for schemas with many numeric fields.
+- Fields with no finite value in the matching set are omitted from the result.
+
+### Covered field types
+
+`i32`, `u32`, `f32`, `f64`, `u16`, `u8`. Excludes `utf8_ref` (categorical handles
+are ordinal but not meaningful as range stats), `bool8` (only 0/1), `i64` (BigInt),
+and all heap-indirected types.
+
+---
+
 ## Feat: vectorized bitset primitives + `StrandView.getFilterBitset`
 
 **Non-breaking addition.**

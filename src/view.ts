@@ -63,7 +63,7 @@ import {
   type StrandMap,
   type StrandStatus,
 } from './types';
-import { createBitset, type FilterPredicate } from './bitset';
+import { createBitset, forEachSet, type ConstrainedRanges, type FilterPredicate } from './bitset';
 
 // ─── Module-level shared decoder ──────────────────────────────────────────────
 
@@ -964,6 +964,103 @@ export class StrandView {
     }
 
     return bs;
+  }
+
+  /**
+   * Scan a bitset of matching records and compute per-field min/max "reality"
+   * for every numeric field in the schema.
+   *
+   * This is the second half of the vectorized constraint pipeline:
+   *
+   *   1. Build one bitset per active predicate with getFilterBitset().
+   *   2. Intersect them with computeIntersection() — O(N/32).
+   *   3. Call getConstrainedRanges(intersection) to learn the min/max of every
+   *      numeric field within that filtered view — drives range-slider bounds.
+   *
+   * Only records whose bit is set in `intersectionBitset` are visited — no full
+   * scan. If the intersection is 1 % of total records, this runs in ~1 % of the
+   * time of a na×ve full scan.
+   *
+   * Architectural constraints (same as getFilterBitset):
+   *
+   *   Windowed reality  — re-snapshots committedCount from Atomics. Uses the same
+   *                       [windowStart, committedCount) window as the bitsets were
+   *                       built against. If committedCount has advanced since the
+   *                       bitsets were built, bits beyond windowSize are ignored
+   *                       (they are zero by construction).
+   *   Hot-loop purity   — no RecordCursor, no JS object per record. Readers are
+   *                       pre-computed per field as typed closures; the hot loop
+   *                       body is an inner loop over O(numericFields) DataView reads.
+   *   Float64Array accumulators — parallel min/max arrays for cache-friendly access.
+   *
+   * @param intersectionBitset  Output of computeIntersection (or a single
+   *                            getFilterBitset result). Bit j = seq windowStart+j.
+   * @returns  Map of field name → { min, max }. Fields with no finite values in
+   *           the matching set are omitted.
+   */
+  getConstrainedRanges(intersectionBitset: Uint32Array): ConstrainedRanges {
+    const committed  = Atomics.load(this.ctrl, CTRL_COMMIT_SEQ);
+    const startSeq   = Math.max(0, committed - this.map.index_capacity);
+    const windowSize = committed - startSeq;
+
+    if (windowSize === 0 || intersectionBitset.length === 0) return {};
+
+    // ── Collect numeric field readers — one-time type dispatch ────────────────
+    // Only inline fixed-width numeric types. utf8_ref handles are ordinal but not
+    // meaningful as range stats. i64 is excluded (BigInt ≠ JS number). bool8 is
+    // excluded (only 0/1; callers can derive frequency separately if needed).
+    type FieldReader = { name: string; byteOffset: number; read: (base: number) => number };
+    const readers: FieldReader[] = [];
+    const data = this.data;
+
+    for (const [name, f] of this.fieldIndex) {
+      let read: (base: number) => number;
+      switch (f.type) {
+        case 'i32': read = (b) => data.getInt32(b,    true); break;
+        case 'u32': read = (b) => data.getUint32(b,   true); break;
+        case 'f32': read = (b) => data.getFloat32(b,  true); break;
+        case 'f64': read = (b) => data.getFloat64(b,  true); break;
+        case 'u16': read = (b) => data.getUint16(b,   true); break;
+        case 'u8':  read = (b) => data.getUint8(b);          break;
+        default: continue; // skip utf8, utf8_ref, json, bytes, i64, bool8, arrays
+      }
+      readers.push({ name, byteOffset: f.byteOffset, read });
+    }
+
+    if (readers.length === 0) return {};
+
+    // ── Parallel Float64Array accumulators — cache-friendly min/max ───────────
+    const n    = readers.length;
+    const mins = new Float64Array(n).fill(Infinity);
+    const maxs = new Float64Array(n).fill(-Infinity);
+
+    const ringMask = this.map.index_capacity - 1;
+    const stride   = this.map.record_stride;
+
+    // ── Hot loop — visits only records set in intersectionBitset ─────────────
+    // forEachSet skips zero bitset words in O(1); total work is O(matches × numericFields).
+    forEachSet(intersectionBitset, windowSize, (j) => {
+      const seq  = startSeq + j;
+      const base = INDEX_START + (seq & ringMask) * stride;
+
+      for (let i = 0; i < n; i++) {
+        const r = readers[i]!;
+        const v = r.read(base + r.byteOffset);
+        if (isFinite(v)) {
+          if (v < mins[i]!) mins[i] = v;
+          if (v > maxs[i]!) maxs[i] = v;
+        }
+      }
+    });
+
+    // ── Collect results — omit fields with no finite values ───────────────────
+    const result: ConstrainedRanges = {};
+    for (let i = 0; i < n; i++) {
+      if (mins[i]! !== Infinity) {
+        result[readers[i]!.name] = { min: mins[i]!, max: maxs[i]! };
+      }
+    }
+    return result;
   }
 
   /**

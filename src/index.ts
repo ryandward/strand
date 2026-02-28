@@ -61,7 +61,7 @@ export {
 export { StrandView, RecordCursor } from './view';
 
 // ─── Bitset ───────────────────────────────────────────────────────────────────
-export type { FilterPredicate } from './bitset';
+export type { FilterPredicate, ConstrainedRanges } from './bitset';
 export {
   createBitset,
   computeIntersection,

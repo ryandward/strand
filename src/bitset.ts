@@ -14,6 +14,15 @@
  * All operations are O(N / 32) where N = window size in records.
  */
 
+// ── Constrained ranges ───────────────────────────────────────────────────────
+
+/**
+ * Per-field min/max derived from the records that passed a filter intersection.
+ * Keys are field names; absent when no finite value was observed for that field.
+ * Returned by `StrandView.getConstrainedRanges()`.
+ */
+export type ConstrainedRanges = Record<string, { min: number; max: number }>;
+
 // ── Filter predicate ──────────────────────────────────────────────────────────
 
 /**

@@ -320,6 +320,7 @@ For producers that hold a direct SAB reference (WASM linear memory, native exten
 | `releaseConsumer(token)` | Release a consumer slot; wakes any stalled producer immediately. |
 | `findFirst(field, value)` | Binary-search committed records for the first where `field >= value`. O(log N). Requires `FIELD_FLAG_SORTED_ASC`. |
 | `getFilterBitset(field, predicate)` | Scan the active ring window and return a `Uint32Array` bitset — bit j set when `seq = windowStart + j` satisfies the predicate. O(N/32). See [Vectorized filtering](#vectorized-filtering). |
+| `getConstrainedRanges(intersectionBitset)` | Walk the set bits and compute per-field min/max for all numeric fields. Returns `ConstrainedRanges`. O(matches × numericFields). |
 | `signalAbort()` | Set `CTRL_ABORT = 1`; wake a stalled producer |
 | `updateInternTable(table)` | Replace the `utf8_ref` intern table; all allocated cursors observe the change immediately |
 | `committedCount` | `Atomics.load(COMMIT_SEQ)` — records safe to read |
@@ -351,24 +352,34 @@ For producers that hold a direct SAB reference (WASM linear memory, native exten
 
 ### Vectorized filtering
 
-For hot-path filtering (millions of records, reactive UI), `getFilterBitset` avoids the per-record overhead of `RecordCursor.seek()` by reading field bytes directly from the SAB `DataView` and writing a packed `Uint32Array` bitset. Multiple predicates are combined with `computeIntersection` (bitwise AND, O(N/32)).
+For hot-path filtering (millions of records, reactive UI), the vectorized pipeline avoids per-record `RecordCursor.seek()` overhead entirely. It has three stages:
+
+1. **`getFilterBitset`** — scan the SAB for each predicate, write matching bits into a `Uint32Array`. O(N) per predicate.
+2. **`computeIntersection`** — AND all bitsets together. O(N/32), 32 records per CPU instruction.
+3. **`getConstrainedRanges`** — walk only the matching bits and compute per-field min/max. O(matches × numericFields).
 
 ```typescript
 import {
   type FilterPredicate,
+  type ConstrainedRanges,
   computeIntersection,
   forEachSet,
 } from '@strand/core';
 
-// Build one bitset per active filter — each scans the SAB once.
+// Stage 1: one bitset per active predicate — each scans the SAB once.
 const bsScore  = view.getFilterBitset('score',  { kind: 'between', lo: 0.5,  hi: 1.0 });
 const bsChrom  = view.getFilterBitset('chrom',  { kind: 'in', handles: new Set([2, 7]) });
 const bsStrand = view.getFilterBitset('strand', { kind: 'eq', value: 0 });
 
-// Intersect in O(N/32) — 32 records resolved per CPU instruction.
+// Stage 2: intersect in O(N/32).
 const matches = computeIntersection([bsScore, bsChrom, bsStrand]);
 
-// Walk only the matching records.
+// Stage 3a: derive constrained min/max for every numeric field in the filtered view.
+const ranges: ConstrainedRanges = view.getConstrainedRanges(matches);
+// ranges.start === { min: 102_400, max: 2_891_003 }
+// ranges.score === { min: 0.5,     max: 0.98      }
+
+// Stage 3b: walk matching records for rendering.
 const ws = view.windowStart;
 const n  = view.committedCount - ws;
 
