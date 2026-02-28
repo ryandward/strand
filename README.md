@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Stream massive datasets to your UI without freezing the page. Yes, really. Nobody had done this.</strong>
+  <strong>Stream massive datasets to your UI without freezing the page. The plumbing nobody built.</strong>
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@ But the web wasn't always like this. It used to be normal for a page to contain 
 
 Some applications still have real data. Genomics pipelines, regulatory databases, financial dashboards, scientific visualization. Hundreds of thousands of records that a human needs to query, scan, and filter. You can't paginate your way out of that. The data is the data and someone has to look at it.
 
-The browser has had the right low-level primitives for years: `SharedArrayBuffer` (threads sharing the same block of memory), `Atomics` (coordination without locks), Web Workers (background threads). But nobody wired them together into something you could actually use. I spent 15 years thinking about this problem, then sat down and built it in 10 days once I realized nobody else was going to.
+The browser has had the right low-level primitives for years: `SharedArrayBuffer` (threads sharing the same block of memory), `Atomics` (coordination without locks), Web Workers (background threads). People have used them, too. There's a [ring buffer library](https://github.com/padenot/ringbuf.js) for streaming audio samples between threads. There are shared-memory data structures for concurrent access to maps and arrays. The O'Reilly book on multithreaded JavaScript describes the pattern in a chapter called "Streaming Data with Ring Buffers." But nobody built the actual thing: a typed, schema-aware record streaming pipeline with backpressure, cancellation, variable-length field support, and a zero-allocation cursor, packaged as something you can `npm install` and use to get data from a Worker onto a screen. The primitives were there. The plumbing wasn't. I spent 15 years thinking about this problem, then sat down and built it in 10 days once I realized nobody else was going to.
 
 Strand lets a background thread write records directly into shared memory while your main thread reads them in place. No copying. No serialization. No object-per-record allocation. Records appear the instant they're committed. If the reader falls behind, the writer pauses automatically. If you need to cancel and restart, one call does it. **1,874× fewer memory allocations** than the object-per-record approach.
 
@@ -522,6 +522,12 @@ async headers() {
 npm test        # tsup build + vitest run (forks pool, --expose-gc)
 npm run typecheck
 ```
+
+---
+
+## Shoutout to `ringbuf.js`
+
+After building Strand I went looking to see if anyone had done something similar and found [`ringbuf.js`](https://github.com/padenot/ringbuf.js) by Paul Adenot. It's a wait-free SPSC ring buffer over `SharedArrayBuffer` built for real-time audio streaming. Same core idea: shared memory, no allocations, no GC. He got there years before I did, just for a completely different domain. If you're doing audio work between an `AudioWorklet` and the main thread, use his library. It's battle-tested and focused on exactly that problem. Strand exists because nobody took that same idea and applied it to structured data and UI rendering.
 
 ---
 
